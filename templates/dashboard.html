@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — Wellx Labs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Raleway:wght@700;900&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --navy:   #003780;
+  --mid:    #1a5ba0;
+  --orange: #e65100;
+  --slate:  #64748b;
+  --dark:   #1a2332;
+  --light:  #f0f4ff;
+  --white:  #ffffff;
+  --green:  #16a34a;
+  --red:    #dc2626;
+  --grad:   linear-gradient(135deg,#003780,#8431cb,#35c5fc);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;background:#0a0a0a;min-height:100vh;color:#1a2332;padding:0 0 80px}
+
+.top-nav{background:#000;border-bottom:3px solid transparent;border-image:var(--grad) 1;display:flex;align-items:center;justify-content:space-between;padding:14px 32px}
+.nav-brand{font-family:'Raleway',sans-serif;font-weight:900;font-size:.7rem;letter-spacing:3px;text-transform:uppercase;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.nav-links{display:flex;gap:6px}
+.nav-links a{color:#94a3b8;font-size:.8rem;font-weight:600;text-decoration:none;padding:6px 14px;border-radius:8px;transition:.15s}
+.nav-links a:hover{background:#1e293b;color:#fff}
+.nav-links a.active{background:var(--navy);color:#fff}
+
+.page{max-width:1200px;margin:32px auto;padding:0 20px}
+h1{font-family:'Raleway',sans-serif;font-weight:900;font-size:1.6rem;color:#fff;margin-bottom:6px}
+.sub{color:#94a3b8;font-size:.85rem;margin-bottom:20px}
+
+/* ── Filter bar ── */
+.filter-bar{background:#fff;border-radius:14px;padding:16px 20px;margin-bottom:20px;box-shadow:0 4px 20px rgba(0,0,0,.4);display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fg label{font-size:.68rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.6px}
+.fg select{border:1.5px solid #e0e7f0;border-radius:8px;padding:6px 10px;font-size:.82rem;font-family:inherit;color:var(--dark);background:#f8faff;outline:none;min-width:140px;transition:.15s}
+.fg select:focus{border-color:var(--navy)}
+.btn{padding:7px 16px;border:none;border-radius:8px;font-size:.82rem;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.btn-primary{background:var(--navy);color:#fff}
+.btn-primary:hover{background:var(--mid)}
+.btn-ghost{background:#f0f4ff;color:var(--navy)}
+.btn-ghost:hover{background:#e0eaff}
+
+/* ── KPI row ── */
+.kpi-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px;margin-bottom:20px}
+.kpi{background:#fff;border-radius:14px;padding:16px 20px;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.kpi .kv{font-family:'Raleway',sans-serif;font-weight:900;font-size:1.35rem;color:var(--navy)}
+.kpi .kl{font-size:.68rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.7px;margin-top:3px}
+
+/* ── Section ── */
+.section{background:#fff;border-radius:16px;padding:22px 26px;margin-bottom:22px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.section-title{font-family:'Raleway',sans-serif;font-weight:900;font-size:.85rem;color:var(--navy);text-transform:uppercase;letter-spacing:1px;margin-bottom:18px;padding-bottom:10px;border-bottom:2px solid var(--light)}
+.chart-wrap{position:relative;height:320px;margin-bottom:18px}
+
+/* ── Legend ── */
+.chart-legend{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:14px;font-size:.78rem;font-weight:600;color:var(--dark)}
+.legend-item{display:flex;align-items:center;gap:5px}
+.legend-swatch{width:12px;height:12px;border-radius:3px;flex-shrink:0}
+
+/* ── Tables ── */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+thead tr{background:var(--navy)}
+thead th{color:#fff;font-size:.74rem;font-weight:700;padding:9px 14px;text-align:left;white-space:nowrap}
+tbody tr:nth-child(even){background:#f8faff}
+tbody tr:hover{background:#eef3ff}
+tbody td{padding:9px 14px;font-size:.83rem;color:var(--dark)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+tfoot tr{background:#e8f0fe}
+tfoot td{padding:9px 14px;font-size:.83rem;font-weight:700;color:var(--navy)}
+.empty-row td{text-align:center;color:#94a3b8;padding:24px!important}
+
+/* ── RM table ── */
+.pct{font-size:.75rem;font-weight:600;padding:2px 7px;border-radius:10px}
+.pct-good{background:#dcfce7;color:#166534}
+.pct-warn{background:#fef9c3;color:#854d0e}
+.pct-bad{background:#fee2e2;color:#991b1b}
+.target-input{border:1.5px solid #e0e7f0;border-radius:6px;padding:4px 8px;font-size:.82rem;font-family:inherit;width:110px;text-align:right;outline:none;transition:.15s}
+.target-input:focus{border-color:var(--navy)}
+.save-btn{padding:4px 10px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:.75rem;font-weight:600;cursor:pointer;transition:.15s;margin-left:4px}
+.save-btn:hover{background:var(--mid)}
+.rm-controls{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.rm-controls select{border:1.5px solid #e0e7f0;border-radius:8px;padding:6px 10px;font-size:.83rem;font-family:inherit;color:var(--dark);background:#f8faff;outline:none}
+
+/* ── Multi-select filter chip ── */
+.ms{position:relative;display:flex;flex-direction:column;gap:3px}
+.ms-label{font-size:.68rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.6px}
+.ms-chip{border:1.5px solid #e0e7f0;border-radius:8px;padding:6px 28px 6px 10px;font-size:.82rem;font-family:inherit;color:var(--dark);background:#f8faff;outline:none;min-width:150px;max-width:220px;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;transition:.15s}
+.ms-chip:hover{border-color:var(--mid)}
+.ms-chip.has-selection{border-color:var(--navy);font-weight:600;color:var(--navy)}
+.ms-chip::after{content:'▾';position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--slate);font-size:.7rem}
+.ms-panel{position:absolute;top:calc(100% + 4px);left:0;background:#fff;border:1.5px solid #e0e7f0;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.25);z-index:100;min-width:220px;max-height:320px;overflow:auto;padding:6px 0;display:none}
+.ms-panel.open{display:block}
+.ms-opt{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:.82rem;color:var(--dark);cursor:pointer;user-select:none}
+.ms-opt:hover{background:#f0f4ff}
+.ms-opt input{accent-color:var(--navy);cursor:pointer}
+.ms-opt.ms-all{border-bottom:1px solid #e0e7f0;font-weight:600;color:var(--navy)}
+
+/* ── Clickable rows for drill-down ── */
+tbody tr.drillable{cursor:pointer}
+tbody tr.drillable:hover{background:#e0eaff !important}
+.trophy{margin-right:5px}
+
+/* ── Print (PDF export) ── */
+@media print {
+  @page { size: A4; margin: 12mm; }
+  html, body { background: #fff !important; color: #000 !important; padding: 0 !important; }
+  .top-nav, .nav-links, .nav-brand,
+  .filter-bar .btn, #dashDlBtn, #dashPrintBtn,
+  .target-input, .save-btn,
+  .rm-controls select, .rm-controls label { display: none !important; }
+  .filter-bar { box-shadow: none !important; border: 1px solid #e0e7f0; padding: 10px 14px; }
+  .fg select { border: none !important; background: transparent !important; padding: 0 !important; font-weight: 600; color: #000 !important; -webkit-appearance: none; appearance: none; }
+  .page { max-width: 100% !important; margin: 0 !important; padding: 0 !important; }
+  h1 { color: #003780 !important; font-size: 1.3rem; }
+  .sub { color: #475569 !important; }
+  .section, .kpi, .filter-bar { box-shadow: none !important; border: 1px solid #e5ecf6; page-break-inside: avoid; }
+  .kpi .kv { color: #003780 !important; }
+  .kpi .kl { color: #475569 !important; }
+  .section-title { color: #003780 !important; }
+  .chart-wrap { height: 260px !important; page-break-inside: avoid; }
+  thead tr { background: #003780 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  thead th { color: #fff !important; }
+  tbody tr:nth-child(even) { background: #f4f8ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  tbody td, tfoot td { color: #000 !important; }
+  .pct-good { background: #dcfce7 !important; color: #166534 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .pct-warn { background: #fef9c3 !important; color: #854d0e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .pct-bad  { background: #fee2e2 !important; color: #991b1b !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .section { page-break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+
+<nav class="top-nav">
+  <span class="nav-brand">Wellx Labs</span>
+  <div class="nav-links">
+    <a href="/">Calculator</a>
+    <a href="/policies">Policies</a>
+    <a href="/dashboard" class="active">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </div>
+</nav>
+
+<div class="page">
+  <h1>Management Dashboard</h1>
+  <p class="sub">Sales performance, broker activity, and RM targets.</p>
+
+  <!-- Global Filters -->
+  <div class="filter-bar">
+    <div class="ms" id="msPlan">
+      <span class="ms-label">Plan</span>
+      <button type="button" class="ms-chip">All Plans</button>
+    </div>
+    <div class="ms" id="msType">
+      <span class="ms-label">Type</span>
+      <button type="button" class="ms-chip">New &amp; Renewal</button>
+    </div>
+    <div class="ms" id="msBroker">
+      <span class="ms-label">Broker</span>
+      <button type="button" class="ms-chip">All Brokers</button>
+    </div>
+    <div class="ms" id="msRm">
+      <span class="ms-label">RM</span>
+      <button type="button" class="ms-chip">All RMs</button>
+    </div>
+    <div class="ms" id="msMonth">
+      <span class="ms-label">Month</span>
+      <button type="button" class="ms-chip">All Months</button>
+    </div>
+    <button class="btn btn-primary" onclick="applyFilters()">Apply</button>
+    <button class="btn btn-ghost" onclick="clearFilters()">Clear</button>
+    <button class="btn btn-ghost" id="dashDlBtn" onclick="downloadDashboard()" style="margin-left:auto">⬇ Download Excel</button>
+    <button class="btn btn-ghost" id="dashPrintBtn" onclick="printDashboard()">🖨 Print / PDF</button>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpi-row">
+    <div class="kpi"><div class="kv" id="kRevenue">—</div><div class="kl">Total Revenue</div></div>
+    <div class="kpi"><div class="kv" id="kTotal">—</div><div class="kl">Total Policies</div></div>
+    <div class="kpi"><div class="kv" id="kGross">—</div><div class="kl">Total Gross Premium</div></div>
+    <div class="kpi"><div class="kv" id="kMembers">—</div><div class="kl">Total Members</div></div>
+    <div class="kpi"><div class="kv" id="kAvg">—</div><div class="kl">Avg Policy Size</div></div>
+  </div>
+
+  <!-- Monthly Sales -->
+  <div class="section">
+    <div class="section-title">Monthly Sales</div>
+
+    <!-- Custom legend -->
+    <div class="chart-legend">
+      <span class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span>Healthx — New</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:#4ade80"></span>Healthx — Renewal</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:#7f1d1d"></span>Healthxclusive — New</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:#f87171"></span>Healthxclusive — Renewal</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:#1d4ed8"></span>Openx — New</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:#93c5fd"></span>Openx — Renewal</span>
+    </div>
+
+    <div class="chart-wrap"><canvas id="monthChart"></canvas></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Month</th>
+          <th class="num">Policies</th>
+          <th class="num">Members</th>
+          <th class="num">Gross Premium</th>
+          <th class="num">Grand Total</th>
+        </tr></thead>
+        <tbody id="monthBody"></tbody>
+        <tfoot><tr>
+          <td>TOTAL</td>
+          <td class="num" id="mfCount">—</td>
+          <td class="num" id="mfMembers">—</td>
+          <td class="num" id="mfGross">—</td>
+          <td class="num" id="mfGrand">—</td>
+        </tr></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- Broker Report -->
+  <div class="section">
+    <div class="section-title">Broker Performance</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Broker</th>
+          <th class="num">Policies</th>
+          <th class="num">Members</th>
+          <th class="num">Gross Premium</th>
+          <th class="num">Grand Total</th>
+          <th class="num">Avg Policy</th>
+        </tr></thead>
+        <tbody id="brokerBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Take Rate by Plan -->
+  <div class="section">
+    <div class="section-title">Take Rate by Plan</div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Plan</th>
+          <th class="num">Policies</th>
+          <th class="num">Total Premium</th>
+          <th class="num">Revenue</th>
+          <th class="num">Take Rate %</th>
+        </tr></thead>
+        <tbody id="takeRateBody"></tbody>
+        <tfoot><tr>
+          <td><strong>TOTAL</strong></td>
+          <td class="num" id="trfPolicies">—</td>
+          <td class="num" id="trfPremium">—</td>
+          <td class="num" id="trfComm">—</td>
+          <td class="num" id="trfRate" style="font-weight:700;color:var(--navy)">—</td>
+        </tr></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- RM vs Targets -->
+  <div class="section">
+    <div class="section-title">RM Sales vs Targets</div>
+    <div class="rm-controls">
+      <label style="font-size:.8rem;font-weight:600;color:var(--slate)">View Month:</label>
+      <select id="rmYear"></select>
+      <select id="rmMonth">
+        <option value="1">January</option><option value="2">February</option>
+        <option value="3">March</option><option value="4">April</option>
+        <option value="5">May</option><option value="6">June</option>
+        <option value="7">July</option><option value="8">August</option>
+        <option value="9">September</option><option value="10">October</option>
+        <option value="11">November</option><option value="12">December</option>
+      </select>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>RM</th>
+          <th class="num">Revenue</th>
+          <th class="num">Policies</th>
+          <th class="num">Actual</th>
+          <th class="num">Target</th>
+          <th class="num">To reach target</th>
+          <th class="num">% of Target</th>
+        </tr></thead>
+        <tbody id="rmBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Plan colours ───────────────────────────────────────────────────────────────
+const PLAN_COLORS = {
+  'Healthx':        { New: '#16a34a', Renewal: '#4ade80' },
+  'Healthxclusive': { New: '#7f1d1d', Renewal: '#f87171' },
+  'Openx':          { New: '#1d4ed8', Renewal: '#93c5fd' },
+  'Unknown':        { New: '#94a3b8', Renewal: '#cbd5e1' },
+};
+const PLANS = ['Healthx', 'Healthxclusive', 'Openx'];
+const TYPES = ['New', 'Renewal'];
+
+let monthlyRows = [], breakdownRows = [], brokersData = [], rmData = {actuals: [], targets: []};
+let monthChart = null;
+
+// ── Year selector ──────────────────────────────────────────────────────────────
+const now = new Date();
+const yearSel = document.getElementById('rmYear');
+for (let y = now.getFullYear(); y >= now.getFullYear() - 2; y--)
+  yearSel.innerHTML += `<option value="${y}" ${y === now.getFullYear() ? 'selected' : ''}>${y}</option>`;
+document.getElementById('rmMonth').value = now.getMonth() + 1;
+
+// ── Multi-select filter state ──────────────────────────────────────────────────
+// filterState holds arrays of selected values per filter key. Empty array = "All".
+const filterState = { plan: [], plan_type: [], broker: [], rm: [], month: [] };
+
+// Build a multi-select chip dropdown for a filter.
+//   containerId - id of the .ms wrapper div
+//   stateKey    - key into filterState
+//   allLabel    - label shown when nothing is selected
+//   options     - array of {value, label}
+function createMultiSelect(containerId, stateKey, allLabel, options) {
+  const wrap  = document.getElementById(containerId);
+  if (!wrap) return;
+  const chip  = wrap.querySelector('.ms-chip');
+  // Remove any existing panel (for re-rendering)
+  const oldPanel = wrap.querySelector('.ms-panel');
+  if (oldPanel) oldPanel.remove();
+
+  const panel = document.createElement('div');
+  panel.className = 'ms-panel';
+  panel.innerHTML =
+    `<label class="ms-opt ms-all"><input type="checkbox" data-all="1"> All</label>` +
+    options.map(o =>
+      `<label class="ms-opt"><input type="checkbox" value="${String(o.value).replace(/"/g,'&quot;')}"> ${o.label}</label>`
+    ).join('');
+  wrap.appendChild(panel);
+
+  const renderChip = () => {
+    const sel = filterState[stateKey];
+    if (!sel.length) {
+      chip.textContent = allLabel;
+      chip.classList.remove('has-selection');
+    } else if (sel.length === 1) {
+      const found = options.find(o => String(o.value) === sel[0]);
+      chip.textContent = found ? found.label : sel[0];
+      chip.classList.add('has-selection');
+    } else {
+      chip.textContent = `${sel.length} selected`;
+      chip.classList.add('has-selection');
+    }
+  };
+
+  const syncChecks = () => {
+    const sel  = new Set(filterState[stateKey]);
+    const all  = panel.querySelector('input[data-all]');
+    panel.querySelectorAll('input:not([data-all])').forEach(cb => {
+      cb.checked = sel.has(cb.value);
+    });
+    all.checked = sel.size === 0;
+  };
+
+  chip.onclick = (e) => {
+    e.stopPropagation();
+    // Close other panels first
+    document.querySelectorAll('.ms-panel.open').forEach(p => { if (p !== panel) p.classList.remove('open'); });
+    panel.classList.toggle('open');
+    if (panel.classList.contains('open')) syncChecks();
+  };
+
+  panel.onclick = (e) => e.stopPropagation();
+
+  panel.querySelectorAll('input').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.dataset.all === '1') {
+        // "All" → clear selection
+        filterState[stateKey] = [];
+      } else {
+        const set = new Set(filterState[stateKey]);
+        if (cb.checked) set.add(cb.value); else set.delete(cb.value);
+        filterState[stateKey] = [...set];
+      }
+      renderChip();
+      syncChecks();
+    });
+  });
+
+  renderChip();
+}
+
+// Close any open panels on outside click
+document.addEventListener('click', () => {
+  document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+});
+
+// ── Populate all filter chips ──────────────────────────────────────────────────
+async function loadMeta() {
+  try {
+    const res = await fetch('/api/policies/meta');
+    const d   = await res.json();
+    const mkOpts = arr => (arr || []).map(v => ({ value: v, label: v }));
+
+    createMultiSelect('msPlan',   'plan',      'All Plans',
+      (d.plans || ['Healthx','Healthxclusive','Openx']).map(v => ({ value: v, label: v })));
+    createMultiSelect('msType',   'plan_type', 'New & Renewal',
+      [{ value: 'New', label: 'New' }, { value: 'Renewal', label: 'Renewal' }]);
+    createMultiSelect('msBroker', 'broker',    'All Brokers', mkOpts(d.brokers));
+    createMultiSelect('msRm',     'rm',        'All RMs',     mkOpts(d.rms));
+    createMultiSelect('msMonth',  'month',     'All Months',
+      (d.months || []).map(m => ({ value: m, label: fmtMonth(m) })));
+  } catch(e) {}
+}
+
+// ── Filters ────────────────────────────────────────────────────────────────────
+function filterParams() {
+  const p = new URLSearchParams();
+  Object.entries(filterState).forEach(([k, arr]) => {
+    if (arr && arr.length) p.set(k, arr.join(','));
+  });
+  return p.toString() ? '?' + p.toString() : '';
+}
+function applyFilters() { loadAll(); }
+function clearFilters() {
+  Object.keys(filterState).forEach(k => filterState[k] = []);
+  // Rebuild chips so labels + checkbox state reset
+  loadMeta().then(loadAll);
+}
+
+// ── Drill-down URL builder ─────────────────────────────────────────────────────
+// Start from current filter state and layer overrides, return /policies?...
+function buildDrillUrl(overrides) {
+  const p = new URLSearchParams();
+  // Start from current filter state (commas allowed on policies page filters? use first value when >1)
+  if (filterState.plan.length)      p.set('plan',      filterState.plan.join(','));
+  if (filterState.plan_type.length) p.set('plan_type', filterState.plan_type.join(','));
+  if (filterState.broker.length)    p.set('broker',    filterState.broker.join(','));
+  if (filterState.rm.length)        p.set('rm',        filterState.rm.join(','));
+  // Month → date range (only when exactly one month selected via dashboard filter)
+  if (filterState.month.length === 1) {
+    const { from, to } = monthRange(filterState.month[0]);
+    p.set('date_from', from);
+    p.set('date_to',   to);
+  }
+  // Apply overrides (win over current state)
+  Object.entries(overrides || {}).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === '') p.delete(k);
+    else p.set(k, v);
+  });
+  return '/policies?' + p.toString();
+}
+
+// Month (YYYY-MM) → date range [first, last] (YYYY-MM-DD)
+function monthRange(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const from = `${y}-${String(m).padStart(2,'0')}-01`;
+  const last = new Date(y, m, 0).getDate(); // day 0 of next month = last day of this month
+  const to   = `${y}-${String(m).padStart(2,'0')}-${String(last).padStart(2,'0')}`;
+  return { from, to };
+}
+
+// ── Load all ───────────────────────────────────────────────────────────────────
+async function loadAll() {
+  const qs = filterParams();
+  const [mRes, bRes, rRes, trRes] = await Promise.all([
+    fetch('/api/dashboard/monthly'   + qs),
+    fetch('/api/dashboard/brokers'   + qs),
+    fetch('/api/dashboard/rm'        + qs),
+    fetch('/api/dashboard/take_rate' + qs),
+  ]);
+  const mJson  = await mRes.json();
+  const bJson  = await bRes.json();
+  const rJson  = await rRes.json();
+  const trJson = await trRes.json();
+
+  monthlyRows   = Array.isArray(mJson?.monthly)   ? mJson.monthly   : [];
+  breakdownRows = Array.isArray(mJson?.breakdown)  ? mJson.breakdown : [];
+  brokersData   = Array.isArray(bJson)             ? bJson           : [];
+  rmData        = (rJson?.actuals)                 ? rJson           : {actuals: [], targets: []};
+
+  renderKPIs();
+  renderMonthly();
+  renderBrokers();
+  renderTakeRate(trJson);
+  renderRM();
+}
+
+// ── Take Rate ──────────────────────────────────────────────────────────────────
+function renderTakeRate(data) {
+  const plans = data?.plans || [];
+  const total = data?.total || {};
+  const fmtP  = v => Number(v).toFixed(2) + '%';
+  document.getElementById('takeRateBody').innerHTML = plans.length
+    ? plans.map(p => {
+        const url = buildDrillUrl({ plan: p.plan });
+        return `<tr class="drillable" onclick="location.href='${url.replace(/'/g,"\\'")}'">
+          <td><strong>${p.plan}</strong></td>
+          <td class="num">${p.policy_count}</td>
+          <td class="num">${fmtNum(p.total_premium)}</td>
+          <td class="num">${fmtNum(p.commission_amount)}</td>
+          <td class="num" style="font-weight:600;color:var(--navy)">${fmtP(p.take_rate_pct)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr class="empty-row"><td colspan="5">No data</td></tr>';
+  document.getElementById('trfPolicies').textContent = plans.reduce((s,p) => s + p.policy_count, 0);
+  document.getElementById('trfPremium').textContent  = fmtNum(total.total_premium || 0);
+  document.getElementById('trfComm').textContent     = fmtNum(total.commission_amount || 0);
+  document.getElementById('trfRate').textContent     = total.take_rate_pct != null ? fmtP(total.take_rate_pct) : '—';
+  document.getElementById('kRevenue').textContent    = fmtCompact(total.commission_amount || 0);
+}
+
+// ── Dashboard download ────────────────────────────────────────────────────────
+async function downloadDashboard() {
+  const btn = document.getElementById('dashDlBtn');
+  btn.disabled = true; btn.textContent = '⏳ Generating…';
+  try {
+    const res = await fetch('/api/dashboard/export' + filterParams());
+    if (!res.ok) { alert('Export failed: ' + res.statusText); return; }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    const cd   = res.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    a.download = match ? match[1] : 'Wellx Policies Report.xlsx';
+    a.href = url; document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  } catch(e) { alert('Network error: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = '⬇ Download Excel'; }
+}
+
+// ── KPIs ───────────────────────────────────────────────────────────────────────
+function renderKPIs() {
+  const totalPolicies = monthlyRows.reduce((s,r) => s + parseInt(r.policy_count||0), 0);
+  const totalGross    = monthlyRows.reduce((s,r) => s + parseFloat(r.gross_premium||0), 0);
+  const totalMembers  = monthlyRows.reduce((s,r) => s + parseInt(r.member_count||0), 0);
+  const avgSize       = totalPolicies ? totalGross / totalPolicies : 0;
+  document.getElementById('kTotal').textContent   = totalPolicies.toLocaleString();
+  document.getElementById('kGross').textContent   = fmtCompact(totalGross);
+  document.getElementById('kMembers').textContent = totalMembers.toLocaleString();
+  document.getElementById('kAvg').textContent     = fmtCompact(avgSize);
+}
+
+// ── Monthly chart + table ──────────────────────────────────────────────────────
+function renderMonthly() {
+  // Collect all months in order
+  const months = [...new Set(breakdownRows.map(r => r.month))].sort();
+
+  // Build lookup: month+plan+type → gross_premium
+  const lookup = {};
+  breakdownRows.forEach(r => {
+    lookup[`${r.month}|${r.plan}|${r.plan_type}`] = parseFloat(r.gross_premium || 0);
+  });
+
+  // 6 datasets (plan × type), each uses its own stack group per type
+  const datasets = [];
+  TYPES.forEach(type => {
+    PLANS.forEach(plan => {
+      const color = (PLAN_COLORS[plan] || PLAN_COLORS['Unknown'])[type];
+      datasets.push({
+        label: `${plan} — ${type}`,
+        data:  months.map(m => lookup[`${m}|${plan}|${type}`] || 0),
+        backgroundColor: color,
+        stack: type,          // same stack = stacked; different = side-by-side
+        borderRadius: 4,
+        borderSkipped: false,
+      });
+    });
+  });
+
+  // Custom plugin: draw totals above each stacked bar group
+  const stackTotalsPlugin = {
+    id: 'stackTotals',
+    afterDatasetsDraw(chart) {
+      const ctx = chart.ctx;
+      ctx.save();
+      ctx.font = 'bold 10px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+
+      // Accumulate totals per stack+dataIndex and track highest bar top
+      const stacks = {};
+      chart.data.datasets.forEach((ds, dsIdx) => {
+        const meta = chart.getDatasetMeta(dsIdx);
+        if (meta.hidden) return;
+        meta.data.forEach((bar, idx) => {
+          const key = `${ds.stack}|${idx}`;
+          const val = Number(chart.data.datasets[dsIdx].data[idx]) || 0;
+          if (!stacks[key]) stacks[key] = { top: bar.y, total: 0, x: bar.x };
+          stacks[key].total += val;
+          if (bar.y < stacks[key].top) stacks[key].top = bar.y;
+        });
+      });
+
+      Object.values(stacks).forEach(({ top, total, x }) => {
+        if (total <= 0) return;
+        ctx.fillStyle = '#1a2332';
+        ctx.fillText('AED ' + fmtNum(total), x, top - 3);
+      });
+      ctx.restore();
+    }
+  };
+
+  if (monthChart) monthChart.destroy();
+  monthChart = new Chart(document.getElementById('monthChart'), {
+    type: 'bar',
+    data: { labels: months.map(fmtMonth), datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },   // using custom legend above
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: AED ${fmtNum(ctx.raw)}`
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { font: { size: 11 } } },
+        y: {
+          ticks: { callback: v => 'AED ' + fmtNum(v), font: { size: 11 } },
+          grid: { color: '#f0f4ff' }
+        }
+      },
+      layout: { padding: { top: 24 } }  // room for total labels
+    },
+    plugins: [stackTotalsPlugin]
+  });
+
+  // Table
+  let sumC=0, sumM=0, sumG=0, sumGrand=0;
+  document.getElementById('monthBody').innerHTML = monthlyRows.length
+    ? monthlyRows.map(r => {
+        sumC     += parseInt(r.policy_count||0);
+        sumM     += parseInt(r.member_count||0);
+        sumG     += parseFloat(r.gross_premium||0);
+        sumGrand += parseFloat(r.grand_total||0);
+        const { from, to } = monthRange(r.month);
+        // Month drill-down: override date range & clear any single-month filter override
+        const url = buildDrillUrl({ date_from: from, date_to: to });
+        return `<tr class="drillable" onclick="location.href='${url.replace(/'/g,"\\'")}'">
+          <td>${fmtMonth(r.month)}</td>
+          <td class="num">${r.policy_count}</td>
+          <td class="num">${parseInt(r.member_count||0).toLocaleString()}</td>
+          <td class="num">${fmtNum(r.gross_premium)}</td>
+          <td class="num">${fmtNum(r.grand_total)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr class="empty-row"><td colspan="5">No data for selected filters</td></tr>';
+
+  document.getElementById('mfCount').textContent   = sumC;
+  document.getElementById('mfMembers').textContent = sumM.toLocaleString();
+  document.getElementById('mfGross').textContent   = fmtNum(sumG);
+  document.getElementById('mfGrand').textContent   = fmtNum(sumGrand);
+}
+
+// ── Brokers ────────────────────────────────────────────────────────────────────
+function renderBrokers() {
+  document.getElementById('brokerBody').innerHTML = brokersData.length
+    ? brokersData.map(r => {
+        const url = buildDrillUrl({ broker: r.broker });
+        return `<tr class="drillable" onclick="location.href='${url.replace(/'/g,"\\'")}'">
+          <td><strong>${r.broker}</strong></td>
+          <td class="num">${r.policy_count}</td>
+          <td class="num">${parseInt(r.total_members||0).toLocaleString()}</td>
+          <td class="num">${fmtNum(r.gross_premium)}</td>
+          <td class="num">${fmtNum(r.total_grand)}</td>
+          <td class="num">${fmtNum(r.avg_policy_size)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr class="empty-row"><td colspan="6">No data for selected filters</td></tr>';
+}
+
+// ── RM vs Targets ──────────────────────────────────────────────────────────────
+function renderRM() {
+  const year  = parseInt(document.getElementById('rmYear').value);
+  const month = parseInt(document.getElementById('rmMonth').value);
+
+  const actualMap = {};
+  (rmData.actuals || []).forEach(a => {
+    if (a.year === year && a.month === month)
+      actualMap[a.rm_name] = {
+        count:   parseInt(a.policy_count||0),
+        amount:  parseFloat(a.actual_amount||0),
+        revenue: parseFloat(a.revenue||0),
+      };
+  });
+  const targetMap = {};
+  (rmData.targets || []).forEach(t => {
+    if (t.year === year && t.month === month)
+      targetMap[t.rm_name] = parseFloat(t.target_amount||0);
+  });
+
+  const allRMs = [...new Set([
+    ...Object.keys(actualMap),
+    ...Object.keys(targetMap),
+    ...(rmData.actuals||[]).map(a => a.rm_name),
+  ])].filter(Boolean);
+
+  // Rank by REVENUE (descending)
+  allRMs.sort((a, b) => (actualMap[b]?.revenue || 0) - (actualMap[a]?.revenue || 0));
+
+  if (!allRMs.length) {
+    document.getElementById('rmBody').innerHTML = '<tr class="empty-row"><td colspan="7">No RM data for selected filters</td></tr>';
+    return;
+  }
+
+  // Build date range for RM drill-down based on selected rmYear/rmMonth
+  const { from: rmFrom, to: rmTo } = monthRange(`${year}-${String(month).padStart(2,'0')}`);
+
+  document.getElementById('rmBody').innerHTML = allRMs.map((rm, idx) => {
+    const revenue  = actualMap[rm]?.revenue || 0;
+    const actual   = actualMap[rm]?.amount  || 0;
+    const count    = actualMap[rm]?.count   || 0;
+    const target   = targetMap[rm] || 0;
+    const gap      = Math.max(target - actual, 0);
+    const hitTarget = target > 0 && actual >= target;
+    const pct      = target > 0 ? actual / target * 100 : null;
+    const pctClass = pct === null ? '' : pct >= 100 ? 'pct-good' : pct >= 70 ? 'pct-warn' : 'pct-bad';
+    const pctLabel = pct === null ? '—' : `<span class="pct ${pctClass}">${pct.toFixed(0)}%</span>`;
+    const safeId   = rm.replace(/\W+/g,'_');
+    const trophy   = idx === 0 && revenue > 0 ? '<span class="trophy">🏆</span>' : '';
+    const drillUrl = buildDrillUrl({ rm, date_from: rmFrom, date_to: rmTo });
+    return `<tr class="drillable" onclick="location.href='${drillUrl}'">
+      <td><strong>${trophy}${rm}</strong></td>
+      <td class="num">${fmtCompact(revenue)}</td>
+      <td class="num">${count}</td>
+      <td class="num">${fmtCompact(actual)}</td>
+      <td class="num" onclick="event.stopPropagation()">
+        <input class="target-input" type="text" inputmode="numeric"
+          value="${target ? fmtNum(target) : ''}" placeholder="Set target" id="ti-${safeId}"
+          onclick="event.stopPropagation()"
+          onfocus="this.value=this.value.replace(/,/g,'')"
+          onblur="if(this.value)this.value=Number(this.value.replace(/,/g,'')).toLocaleString('en-AE',{maximumFractionDigits:0})">
+        <button class="save-btn" onclick="event.stopPropagation();saveTarget('${rm.replace(/'/g,"\\'")}')">Save</button>
+      </td>
+      <td class="num" style="color:${hitTarget?'#16a34a':'#dc2626'};font-weight:600">
+        ${target > 0 ? fmtCompact(gap) : '—'}
+      </td>
+      <td class="num">${pctLabel}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function saveTarget(rmName) {
+  const year  = parseInt(document.getElementById('rmYear').value);
+  const month = parseInt(document.getElementById('rmMonth').value);
+  const val   = parseFloat((document.getElementById(`ti-${rmName.replace(/\W+/g,'_')}`).value || '').replace(/,/g,'')) || 0;
+  const res   = await fetch('/api/dashboard/rm_targets', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ rm_name: rmName, year, month, target_amount: val }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    const ex = rmData.targets.find(t => t.rm_name===rmName && t.year===year && t.month===month);
+    if (ex) ex.target_amount = val;
+    else rmData.targets.push({ rm_name: rmName, year, month, target_amount: val });
+    renderRM();
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+function fmtMonth(s) {
+  if (!s) return '—';
+  const [y, m] = s.split('-');
+  return new Date(y, parseInt(m)-1, 1).toLocaleDateString('en-GB', {month:'short', year:'2-digit'});
+}
+function fmtNum(n) {
+  return Number(n||0).toLocaleString('en-AE', {minimumFractionDigits:0, maximumFractionDigits:0});
+}
+function printDashboard() {
+  // Ensure Chart.js canvases re-render at print size
+  if (window.Chart && Chart.instances) {
+    Object.values(Chart.instances).forEach(c => { try { c.resize(); } catch(e){} });
+  }
+  setTimeout(() => window.print(), 100);
+}
+function fmtCompact(n) {
+  const v = Number(n||0);
+  const a = Math.abs(v);
+  const sign = v < 0 ? '-' : '';
+  if (a >= 1e6) return sign + (a/1e6).toFixed(2).replace(/\.?0+$/,'') + 'M';
+  if (a >= 1e3) return sign + Math.round(a/1e3) + 'K';
+  return sign + Math.round(a).toLocaleString('en-AE');
+}
+
+document.getElementById('rmYear').addEventListener('change', renderRM);
+document.getElementById('rmMonth').addEventListener('change', renderRM);
+
+loadMeta();
+loadAll();
+</script>
+</body>
+</html>

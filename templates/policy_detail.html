@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Policy Detail — Wellx Labs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Raleway:wght@700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --navy:   #003780;
+  --mid:    #1a5ba0;
+  --orange: #e65100;
+  --slate:  #64748b;
+  --dark:   #1a2332;
+  --light:  #f0f4ff;
+  --white:  #ffffff;
+  --green:  #16a34a;
+  --red:    #dc2626;
+  --grad:   linear-gradient(135deg,#003780,#8431cb,#35c5fc);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',system-ui,sans-serif;background:#0a0a0a;min-height:100vh;color:#1a2332;padding:0 0 80px}
+
+.top-nav{background:#000;border-bottom:3px solid transparent;border-image:var(--grad) 1;display:flex;align-items:center;justify-content:space-between;padding:14px 32px}
+.nav-brand{font-family:'Raleway',sans-serif;font-weight:900;font-size:.7rem;letter-spacing:3px;text-transform:uppercase;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.nav-links{display:flex;gap:6px}
+.nav-links a{color:#94a3b8;font-size:.8rem;font-weight:600;text-decoration:none;padding:6px 14px;border-radius:8px;transition:.15s}
+.nav-links a:hover{background:#1e293b;color:#fff}
+.nav-links a.active{background:var(--navy);color:#fff}
+
+.page{max-width:1100px;margin:32px auto;padding:0 20px}
+
+.back-btn{display:inline-flex;align-items:center;gap:6px;color:#94a3b8;font-size:.83rem;font-weight:600;text-decoration:none;padding:6px 12px;border-radius:8px;transition:.15s}
+.back-btn:hover{background:#1e293b;color:#fff}
+.del-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;background:#fee2e2;color:#991b1b;border:1.5px solid #fca5a5;border-radius:8px;font-size:.82rem;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.del-btn:hover{background:#dc2626;color:#fff;border-color:#dc2626}
+
+.page-header{margin-bottom:24px}
+.page-header h1{font-family:'Raleway',sans-serif;font-weight:900;font-size:1.7rem;color:#fff}
+.page-header .meta{color:#94a3b8;font-size:.85rem;margin-top:4px}
+
+/* ── Cards ── */
+.card{background:#fff;border-radius:16px;padding:22px 26px;margin-bottom:18px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.card-title{font-family:'Raleway',sans-serif;font-weight:900;font-size:.85rem;color:var(--navy);text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid var(--light)}
+
+/* ── Info grid ── */
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.info-item .lbl{font-size:.7rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.6px;margin-bottom:3px}
+.info-item .val{font-size:.9rem;font-weight:600;color:var(--dark)}
+
+/* ── Totals ── */
+.totals-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.total-item{background:var(--light);border-radius:10px;padding:12px 16px;text-align:center}
+.total-item .tv{font-family:'Raleway',sans-serif;font-weight:900;font-size:1rem;color:var(--navy)}
+.total-item .tl{font-size:.68rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.6px;margin-top:2px}
+.total-item.highlight{background:var(--navy)}
+.total-item.highlight .tv{color:var(--white);font-size:1.15rem}
+.total-item.highlight .tl{color:#a5c4f0}
+
+/* ── Recon badge ── */
+.recon-row{display:flex;align-items:center;gap:12px;margin-top:14px;padding:12px 16px;border-radius:10px}
+.recon-row.match{background:#dcfce7;border:1.5px solid #86efac}
+.recon-row.mismatch{background:#fee2e2;border:1.5px solid #fca5a5}
+.recon-row .icon{font-size:1.2rem}
+.recon-row .text{font-size:.85rem;font-weight:600}
+.recon-row.match .text{color:#166534}
+.recon-row.mismatch .text{color:#991b1b}
+
+/* ── Category tabs ── */
+.cat-tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.cat-tab{padding:6px 16px;border:1.5px solid #e0e7f0;border-radius:20px;font-size:.8rem;font-weight:700;color:var(--slate);cursor:pointer;transition:.15s;background:#f8faff}
+.cat-tab.active{background:var(--navy);border-color:var(--navy);color:#fff}
+.cat-panel{display:none}
+.cat-panel.active{display:block}
+.mat-rate{display:inline-flex;align-items:center;gap:6px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:6px 12px;font-size:.8rem;font-weight:600;color:var(--orange);margin-bottom:12px}
+
+/* ── Tables ── */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+thead tr{background:var(--navy)}
+thead th{color:#fff;font-size:.74rem;font-weight:700;padding:9px 12px;text-align:left;white-space:nowrap}
+tbody tr:nth-child(even){background:#f8faff}
+tbody tr:hover{background:#eef3ff}
+tbody td{padding:9px 12px;font-size:.82rem;color:var(--dark);white-space:nowrap}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:2px 7px;border-radius:20px;font-size:.69rem;font-weight:700}
+.badge-m{background:#dbeafe;color:#1e40af}
+.badge-f{background:#fce7f3;color:#9d174d}
+.badge-emp{background:#dcfce7;color:#166534}
+.badge-dep{background:#f3e8ff;color:#6b21a8}
+
+/* ── Rate editing ── */
+.rate-edit-bar{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.rate-input{border:1.5px solid #bfdbfe;border-radius:6px;padding:4px 7px;font-size:.82rem;font-family:inherit;width:90px;text-align:right;outline:none;background:#eff6ff;color:var(--dark);transition:.15s}
+.rate-input:focus{border-color:var(--navy);background:#fff}
+.mat-input{width:110px}
+.rates-saving{display:none;font-size:.8rem;font-weight:600;color:var(--slate);align-items:center;gap:6px}
+
+/* ── Member row actions ── */
+.mem-edit-btn,.mem-del-btn{padding:3px 9px;border:none;border-radius:5px;font-size:.72rem;font-weight:600;cursor:pointer;transition:.15s;font-family:inherit}
+.mem-edit-btn{background:#eff6ff;color:#1d4ed8}
+.mem-edit-btn:hover{background:#1d4ed8;color:#fff}
+.mem-del-btn{background:#fee2e2;color:#991b1b;margin-left:4px}
+.mem-del-btn:hover{background:#dc2626;color:#fff}
+
+/* ── Census upload ── */
+.census-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.census-status{font-size:.8rem;font-weight:600;color:var(--slate)}
+.progress-bar-wrap{height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden;width:200px;display:none}
+.progress-bar{height:100%;background:var(--navy);width:0;transition:width .3s;border-radius:3px}
+
+/* ── Edit button ── */
+.edit-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;background:#eff6ff;color:#1d4ed8;border:1.5px solid #bfdbfe;border-radius:8px;font-size:.82rem;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.edit-btn:hover{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
+/* ── Download button ── */
+.dl-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;background:#f0fdf4;color:#166534;border:1.5px solid #86efac;border-radius:8px;font-size:.82rem;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.dl-btn:hover{background:#16a34a;color:#fff;border-color:#16a34a}
+.dl-btn:disabled{background:#f1f5f9;color:#94a3b8;border-color:#e2e8f0;cursor:default}
+
+/* ── Modal overlay ── */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;padding:20px}
+.modal-bg.open{display:flex}
+.modal{background:#fff;border-radius:16px;width:100%;max-width:640px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:20px 24px 0}
+.modal-header h2{font-family:'Raleway',sans-serif;font-weight:900;font-size:1.1rem;color:var(--dark)}
+.modal-close{background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--slate);line-height:1;padding:2px 6px;border-radius:4px}
+.modal-close:hover{background:#f3f4f6;color:var(--dark)}
+.modal-body{padding:20px 24px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.modal-body .full{grid-column:1/-1}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group label{font-size:.7rem;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.6px}
+.form-group input,.form-group select{border:1.5px solid #e0e7f0;border-radius:8px;padding:8px 11px;font-size:.85rem;font-family:inherit;color:var(--dark);background:#f8faff;outline:none;transition:.15s}
+.form-group input:focus,.form-group select:focus{border-color:var(--navy);background:#fff;box-shadow:0 0 0 3px rgba(0,55,128,.08)}
+.form-group .hint{font-size:.68rem;color:var(--slate)}
+.modal-footer{display:flex;justify-content:flex-end;gap:10px;padding:16px 24px;border-top:1px solid #f3f4f6}
+.btn-save{padding:9px 22px;background:var(--navy);color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:700;font-family:inherit;cursor:pointer;transition:.15s}
+.btn-save:hover{background:var(--mid)}
+.btn-save:disabled{background:#93c5fd;cursor:default}
+.btn-cancel{padding:9px 18px;background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;font-size:.85rem;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.btn-cancel:hover{background:#e5e7eb}
+
+/* ── Toast ── */
+#toast{position:fixed;bottom:28px;right:28px;padding:12px 20px;border-radius:9px;font-size:13px;font-weight:600;color:#fff;z-index:9999;transition:opacity .3s;pointer-events:none;opacity:0}
+#toast.show{opacity:1}
+#toast.ok{background:#16a34a}
+#toast.err{background:#dc2626}
+</style>
+</head>
+<body>
+
+<nav class="top-nav">
+  <span class="nav-brand">Wellx Labs</span>
+  <div class="nav-links">
+    <a href="/">Calculator</a>
+    <a href="/policies" class="active">Policies</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </div>
+</nav>
+
+<div class="page">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+    <a href="/policies" class="back-btn" style="margin-bottom:0">← Back to Policies</a>
+    <div style="display:flex;gap:8px">
+      <button class="dl-btn" id="detailDlBtn" onclick="downloadSummary()">⬇ Download Summary</button>
+      <button class="edit-btn" onclick="openEdit()">✏️ Edit Policy</button>
+      <button class="del-btn" onclick="deletePolicy()">🗑 Delete Policy</button>
+    </div>
+  </div>
+
+  <div class="page-header">
+    <h1 id="phCompany">Loading…</h1>
+    <div class="meta" id="phMeta"></div>
+  </div>
+
+  <!-- Policy Header -->
+  <div class="card">
+    <div class="card-title">Policy Details</div>
+    <div class="info-grid" id="infoGrid"></div>
+  </div>
+
+  <!-- Commission -->
+  <div class="card">
+    <div class="card-title">Commission Structure</div>
+    <div class="info-grid" id="commGrid"></div>
+  </div>
+
+  <!-- Premium Totals -->
+  <div class="card">
+    <div class="card-title">Premium Totals</div>
+    <div class="totals-grid" id="totalsGrid"></div>
+    <div id="reconRow"></div>
+  </div>
+
+  <!-- Category Rates -->
+  <div class="card">
+    <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Category Rate Tables</span>
+      <div class="rate-edit-bar" style="margin:0">
+        <span class="rates-saving" id="ratesSaving">⏳ Saving &amp; recalculating…</span>
+        <button class="edit-btn" id="ratesEditBtn" onclick="startEditRates()">✏️ Edit Rates</button>
+        <button class="btn-save" id="ratesSaveBtn" style="display:none;padding:6px 16px;font-size:.82rem" onclick="saveRates()">💾 Save Rates</button>
+        <button class="btn-cancel" id="ratesCancelBtn" style="display:none;padding:6px 14px;font-size:.82rem" onclick="cancelEditRates()">Cancel</button>
+      </div>
+    </div>
+    <div class="cat-tabs" id="catTabs" style="margin-top:14px"></div>
+    <div id="catPanels"></div>
+  </div>
+
+  <!-- Member List -->
+  <div class="card">
+    <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Member List (<span id="memCount">0</span> members)</span>
+      <div class="census-bar" style="margin:0;gap:10px">
+        <span class="census-status" id="censusStatus"></span>
+        <div class="progress-bar-wrap" id="censusProgress"><div class="progress-bar" id="censusBar"></div></div>
+        <button class="edit-btn" onclick="triggerCensusUpload()">📤 Replace Census</button>
+        <input type="file" id="censusFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadCensus(this)"/>
+        <button class="edit-btn" onclick="openMemberModal(null)" style="background:#dcfce7;color:#166534;border-color:#86efac">+ Add Member</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Name</th><th>DOB</th><th>Gender</th>
+            <th>Category</th><th>Relation</th><th>Age</th><th>Bracket</th>
+            <th class="num">Base Premium</th><th class="num">Maternity</th>
+            <th class="num">Loading</th><th class="num">Final Premium</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="memberBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /page -->
+
+<!-- ── Member Modal ───────────────────────────────────────────────────────── -->
+<div class="modal-bg" id="memberModal" onclick="if(event.target===this)closeMemberModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="memberModalTitle">Add Member</h2>
+      <button class="modal-close" onclick="closeMemberModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group full">
+        <label>Full Name</label>
+        <input type="text" id="mName" placeholder="As in passport"/>
+      </div>
+      <div class="form-group">
+        <label>Date of Birth</label>
+        <input type="date" id="mDob"/>
+      </div>
+      <div class="form-group">
+        <label>Gender</label>
+        <select id="mGender">
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Marital Status</label>
+        <select id="mMarital">
+          <option value="Single">Single</option>
+          <option value="Married">Married</option>
+          <option value="Divorced">Divorced</option>
+          <option value="Widowed">Widowed</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Relation</label>
+        <select id="mRelation">
+          <option value="Employee">Employee</option>
+          <option value="Spouse">Spouse</option>
+          <option value="Child">Child</option>
+          <option value="Parent">Parent</option>
+          <option value="Domestic Worker">Domestic Worker</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Category</label>
+        <select id="mCategory"></select>
+      </div>
+      <div class="form-group">
+        <label>Emirate of Visa</label>
+        <select id="mEmirate">
+          <option value="Dubai">Dubai</option>
+          <option value="Abu Dhabi">Abu Dhabi</option>
+          <option value="Sharjah">Sharjah</option>
+          <option value="Ajman">Ajman</option>
+          <option value="Ras Al Khaimah">Ras Al Khaimah</option>
+          <option value="Fujairah">Fujairah</option>
+          <option value="Umm Al Quwain">Umm Al Quwain</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Extra Loading (AED)</label>
+        <input type="number" id="mLoading" value="0" min="0" step="0.01"/>
+        <span class="hint">Manual gross loading on top of base rate</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeMemberModal()">Cancel</button>
+      <button class="btn-save" id="mSaveBtn" onclick="saveMember()">Save Member</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit Modal ─────────────────────────────────────────────────────────── -->
+<div class="modal-bg" id="editModal" onclick="if(event.target===this)closeEdit()">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>✏️ Edit Policy</h2>
+      <button class="modal-close" onclick="closeEdit()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group full">
+        <label>Company Name</label>
+        <input type="text" id="eCompany" placeholder="Company name"/>
+      </div>
+      <div class="form-group">
+        <label>Plan</label>
+        <select id="ePlan">
+          <option value="Healthx">Healthx</option>
+          <option value="Healthxclusive">Healthxclusive</option>
+          <option value="Openx">Openx</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Plan Type</label>
+        <select id="ePlanType">
+          <option value="New">New</option>
+          <option value="Renewal">Renewal</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Broker</label>
+        <select id="eBroker"></select>
+      </div>
+      <div class="form-group">
+        <label>RM / Account Exec</label>
+        <select id="eRm"></select>
+      </div>
+      <div class="form-group">
+        <label>Underwriter / Prepared by</label>
+        <select id="eUnderwriter"></select>
+      </div>
+      <div class="form-group">
+        <label>Start Date</label>
+        <input type="date" id="eStartDate"/>
+      </div>
+      <div class="form-group">
+        <label>Inception Payment</label>
+        <select id="eInception">
+          <option value="Annual">Annual</option>
+          <option value="Quarterly">Quarterly</option>
+          <option value="Monthly">Monthly</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Endorsement Frequency</label>
+        <select id="eEndorsement">
+          <option value="Monthly">Monthly</option>
+          <option value="Quarterly">Quarterly</option>
+          <option value="Annual">Annual</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>LSB Members</label>
+        <select id="eLsb">
+          <option value="false">No</option>
+          <option value="true">Yes</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Confirmation Date</label>
+        <input type="date" id="eConfirmationDate"/>
+        <small style="color:#6b7280;font-size:.72rem">Month this sale counts in</small>
+      </div>
+      <div class="form-group full">
+        <label>Reconciliation Note</label>
+        <textarea id="eReconNote" rows="2" placeholder="Notes on premium discrepancy…" style="width:100%;border:1.5px solid #d1d5db;border-radius:8px;padding:8px 10px;font-size:.82rem;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+      </div>
+      <!-- Commission -->
+      <div class="form-group full" style="margin-top:4px">
+        <label style="font-size:.72rem;color:#003780;border-bottom:1px solid #e0e7f0;padding-bottom:4px">Commission Rates (%)</label>
+      </div>
+      <div class="form-group">
+        <label>Broker %</label>
+        <input type="number" id="eRmBroker" step="0.01" min="0" max="100"/>
+      </div>
+      <div class="form-group">
+        <label>Insurer (QIC/DNI) %</label>
+        <input type="number" id="eRmInsurer" step="0.01" min="0" max="100"/>
+      </div>
+      <div class="form-group">
+        <label>Wellx %</label>
+        <input type="number" id="eRmWellx" step="0.01" min="0" max="100"/>
+      </div>
+      <div class="form-group">
+        <label>TPA (NAS) %</label>
+        <input type="number" id="eRmTpa" step="0.01" min="0" max="100"/>
+      </div>
+      <div class="form-group">
+        <label>Insurance Levy %</label>
+        <input type="number" id="eRmTax" step="0.01" min="0" max="100"/>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeEdit()">Cancel</button>
+      <button class="btn-save" id="eSaveBtn" onclick="saveEdit()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const PID = {{ policy_id }};
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+function fmtDateShort(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' });
+}
+function fmtNum(n) {
+  return Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+function fmt1(n) {
+  return Number(n || 0).toFixed(1).replace(/\.0$/, '');
+}
+
+async function deletePolicy() {
+  const name = document.getElementById('phCompany').textContent;
+  if (!confirm(`Delete policy #${PID} — "${name}"?\n\nThis permanently removes all member data and rate tables. This cannot be undone.`)) return;
+  const res  = await fetch(`/api/policies/${PID}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (data.ok) {
+    alert('Policy deleted.');
+    location.href = '/policies';
+  } else {
+    alert('Delete failed: ' + (data.error || 'Unknown error'));
+  }
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = '', 2800);
+}
+
+// ── Edit modal ─────────────────────────────────────────────────────────────────
+let _policyCache = null;
+
+async function openEdit() {
+  // Load settings dropdowns (broker, RM, underwriter)
+  try {
+    const [bRes, uRes, rRes] = await Promise.all([
+      fetch('/api/settings/brokers'),
+      fetch('/api/settings/underwriters'),
+      fetch('/api/settings/rm_persons'),
+    ]);
+    const brokers      = (await bRes.json()).map(r => r.name);
+    const underwriters = (await uRes.json()).map(r => r.name);
+    const rms          = (await rRes.json()).map(r => r.name);
+    fillSelect('eBroker',      brokers,      true);
+    fillSelect('eUnderwriter', underwriters, true);
+    fillSelect('eRm',          rms,          true);
+  } catch(e) { /* dropdowns stay blank */ }
+
+  // Pre-fill from cached policy data
+  if (_policyCache) {
+    const p = _policyCache;
+    setVal('eCompany',     p.company_name    || '');
+    setVal('ePlan',        p.plan            || '');
+    setVal('ePlanType',    p.plan_type       || '');
+    setVal('eBroker',      p.broker          || '');
+    setVal('eRm',          p.rm_person       || '');
+    setVal('eUnderwriter', p.underwriter     || '');
+    setVal('eStartDate',         p.start_date         ? p.start_date.slice(0, 10) : '');
+    setVal('eInception',         p.inception_payment  || '');
+    setVal('eEndorsement', p.endorsement_freq  || '');
+    setVal('eLsb',               p.has_lsb ? 'true' : 'false');
+    setVal('eConfirmationDate',  p.confirmation_date  ? p.confirmation_date.slice(0, 10) : new Date().toISOString().slice(0, 10));
+    setVal('eReconNote',         p.recon_note || '');
+    setVal('eRmBroker',    p.rm_broker   ?? '');
+    setVal('eRmInsurer',   p.rm_insurer  ?? '');
+    setVal('eRmWellx',     p.rm_wellx    ?? '');
+    setVal('eRmTpa',       p.rm_tpa      ?? '');
+    setVal('eRmTax',       p.rm_insurance_tax ?? '');
+  }
+
+  document.getElementById('editModal').classList.add('open');
+  document.getElementById('eCompany').focus();
+}
+
+function closeEdit() {
+  document.getElementById('editModal').classList.remove('open');
+}
+
+async function saveEdit() {
+  const btn = document.getElementById('eSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  const payload = {
+    company_name:       document.getElementById('eCompany').value.trim(),
+    plan:               document.getElementById('ePlan').value,
+    plan_type:          document.getElementById('ePlanType').value,
+    broker:             document.getElementById('eBroker').value,
+    rm_person:          document.getElementById('eRm').value,
+    underwriter:        document.getElementById('eUnderwriter').value,
+    start_date:         document.getElementById('eStartDate').value || null,
+    inception_payment:  document.getElementById('eInception').value,
+    endorsement_freq:   document.getElementById('eEndorsement').value,
+    has_lsb:            document.getElementById('eLsb').value === 'true',
+    confirmation_date:  document.getElementById('eConfirmationDate').value || null,
+    recon_note:         document.getElementById('eReconNote').value.trim() || null,
+    rm_broker:          parseFloat(document.getElementById('eRmBroker').value)  || 0,
+    rm_insurer:         parseFloat(document.getElementById('eRmInsurer').value) || 0,
+    rm_wellx:           parseFloat(document.getElementById('eRmWellx').value)   || 0,
+    rm_tpa:             parseFloat(document.getElementById('eRmTpa').value)     || 0,
+    rm_insurance_tax:   parseFloat(document.getElementById('eRmTax').value)     || 0,
+  };
+
+  try {
+    const res  = await fetch(`/api/policies/${PID}`, {
+      method:  'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || 'Save failed', 'err');
+    } else {
+      closeEdit();
+      toast('Policy updated ✓');
+      loadDetail();   // refresh the page display
+    }
+  } catch(e) {
+    toast('Network error', 'err');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Save Changes';
+  }
+}
+
+function fillSelect(id, items, allowBlank = false) {
+  const sel = document.getElementById(id);
+  const cur = sel.value;
+  sel.innerHTML = (allowBlank ? '<option value="">—</option>' : '') +
+    items.map(v => `<option value="${v}">${v}</option>`).join('');
+  if (cur) sel.value = cur;
+}
+
+function setVal(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val;
+}
+
+// Patch loadDetail to cache policy data
+const _origLoadDetail = loadDetail;
+async function loadDetail() {
+  const res  = await fetch(`/api/policies/${PID}`);
+  const data = await res.json();
+  if (data.error) { document.querySelector('.page-header h1').textContent = 'Policy not found'; return; }
+
+  _policyCache    = data.policy;  // cache for edit modal
+  _ratesEditMode  = false;
+  const rEB = document.getElementById('ratesEditBtn');
+  const rSB = document.getElementById('ratesSaveBtn');
+  const rCB = document.getElementById('ratesCancelBtn');
+  const rSv = document.getElementById('ratesSaving');
+  if (rEB) { rEB.style.display=''; rSB.style.display='none'; rCB.style.display='none'; rSv.style.display='none'; }
+
+  const p = data.policy;
+
+  // Header
+  document.getElementById('phCompany').textContent = p.company_name || '—';
+  document.getElementById('phMeta').textContent =
+    `Policy #${p.id} · Saved ${fmtDate(p.created_at)} · ${p.plan || ''} ${p.plan_type || ''}`;
+
+  // Info grid
+  const info = [
+    ['Broker',            p.broker],
+    ['RM / Account Exec', p.rm_person],
+    ['Plan',              p.plan],
+    ['Plan Type',         p.plan_type],
+    ['Start Date',        fmtDateShort(p.start_date)],
+    ['Prepared by',       p.underwriter],
+    ['Inception Payment', p.inception_payment],
+    ['Endorsement Freq',  p.endorsement_freq],
+    ['LSB Members',       p.has_lsb ? 'Yes' : 'No'],
+    ['Confirmation Date', fmtDateShort(p.confirmation_date)],
+    ...(p.recon_note ? [['Recon Note', p.recon_note]] : []),
+  ];
+  document.getElementById('infoGrid').innerHTML = info.map(([l, v]) => `
+    <div class="info-item"><div class="lbl">${l}</div><div class="val">${v || '—'}</div></div>
+  `).join('');
+
+  // Commission
+  const insLabel = (p.plan || '').toLowerCase() === 'openx' ? 'DNI' : 'QIC';
+  const comm = [
+    ['Broker', fmt1(p.rm_broker) + '%'],
+    [insLabel,  fmt1(p.rm_insurer) + '%'],
+    ['Wellx',  fmt1(p.rm_wellx) + '%'],
+    ['TPA (NAS)', fmt1(p.rm_tpa) + '%'],
+    ['Insurance Levy', fmt1(p.rm_insurance_tax) + '%'],
+  ];
+  const totalComm = [p.rm_broker, p.rm_insurer, p.rm_wellx, p.rm_tpa, p.rm_insurance_tax]
+    .reduce((a,b) => a + (parseFloat(b) || 0), 0);
+  comm.push(['Total Commission', fmt1(totalComm) + '%']);
+  document.getElementById('commGrid').innerHTML = comm.map(([l, v]) => `
+    <div class="info-item"><div class="lbl">${l}</div><div class="val">${v}</div></div>
+  `).join('');
+
+  // Totals
+  const totalPremium = (parseFloat(p.total_net)||0) + (parseFloat(p.total_maternity)||0);
+  const totals = [
+    ['Premium',           p.total_net,    false],
+    ['Maternity Premium', p.total_maternity, false],
+    ['Total Premium',     totalPremium,   true],
+  ];
+  document.getElementById('totalsGrid').innerHTML = totals.map(([l, v, hi]) => `
+    <div class="total-item ${hi ? 'highlight' : ''}">
+      <div class="tv">AED ${fmtNum(v)}</div>
+      <div class="tl">${l}</div>
+    </div>
+  `).join('');
+
+  // Reconciliation
+  const diff = parseFloat(p.recon_difference) || 0;
+  const match = p.recon_match;
+  const confirmedQuote = parseFloat(p.confirmed_quote) || 0;
+  const calcPrem = parseFloat(p.total_net) + parseFloat(p.total_maternity);
+  if (confirmedQuote > 0) {
+    document.getElementById('reconRow').innerHTML = `
+      <div class="recon-row ${match ? 'match' : 'mismatch'}">
+        <span class="icon">${match ? '✅' : '❌'}</span>
+        <span class="text">
+          ${match
+            ? `Calculated AED ${fmtNum(calcPrem)} matches confirmed quote AED ${fmtNum(confirmedQuote)}`
+            : `Variance AED ${fmtNum(Math.abs(diff))} — Confirmed quote AED ${fmtNum(confirmedQuote)} vs Calculated AED ${fmtNum(calcPrem)}`}
+        </span>
+      </div>`;
+  }
+
+  // Categories (clear first to avoid duplication on reload)
+  const tabs  = document.getElementById('catTabs');
+  const panels = document.getElementById('catPanels');
+  tabs.innerHTML = ''; panels.innerHTML = '';
+  data.categories.forEach((cat, i) => {
+    const brackets = cat.brackets || [];
+    const tab = document.createElement('div');
+    tab.className = 'cat-tab' + (i === 0 ? ' active' : '');
+    tab.textContent = `Cat ${cat.category}`;
+    tab.onclick = () => {
+      document.querySelectorAll('.cat-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.cat-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(`panel-${cat.category}`).classList.add('active');
+    };
+    tabs.appendChild(tab);
+
+    const panel = document.createElement('div');
+    panel.className = 'cat-panel' + (i === 0 ? ' active' : '');
+    panel.id = `panel-${cat.category}`;
+    panel.innerHTML = `
+      <div class="mat-rate" style="cursor:default">
+        🤱 Maternity Rate (AED/yr):&nbsp;
+        <span data-rate-val="${cat.maternity_rate||0}"
+              data-rate-type="maternity"
+              data-cat-id="${cat.id}"
+              data-mat-input="1">AED ${fmtNum(cat.maternity_rate)}</span>
+      </div>
+      <div class="tbl-wrap" style="margin-top:10px">
+        <table>
+          <thead><tr><th>Age Range</th><th class="num">Male Rate (AED/yr)</th><th class="num">Female Rate (AED/yr)</th></tr></thead>
+          <tbody>
+            ${brackets.map(b => `
+              <tr>
+                <td>${b.label}</td>
+                <td class="num">
+                  <span data-rate-val="${b.male_rate||0}"
+                        data-rate-type="male"
+                        data-rate-id="${b.id}"
+                        data-cat-id="${cat.id}">${fmtNum(b.male_rate)}</span>
+                </td>
+                <td class="num">
+                  <span data-rate-val="${b.female_rate||0}"
+                        data-rate-type="female"
+                        data-rate-id="${b.id}"
+                        data-cat-id="${cat.id}">${fmtNum(b.female_rate)}</span>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    panels.appendChild(panel);
+  });
+
+  // Members
+  document.getElementById('memCount').textContent = data.members.length;
+  // Store members for the modal
+  _membersCache = data.members;
+  // Build available categories list from this policy
+  _policyCategories = (data.categories || []).map(c => c.category);
+
+  document.getElementById('memberBody').innerHTML = data.members.map(m => {
+    const mj = encodeURIComponent(JSON.stringify(m));
+    return `<tr>
+      <td>${m.member_no ?? ''}</td>
+      <td><strong>${m.name || '—'}</strong></td>
+      <td>${fmtDateShort(m.dob)}</td>
+      <td><span class="badge ${m.gender === 'Female' ? 'badge-f' : 'badge-m'}">${m.gender || '—'}</span></td>
+      <td>${m.category || '—'}</td>
+      <td><span class="badge ${m.relation === 'Employee' ? 'badge-emp' : 'badge-dep'}">${m.relation || '—'}</span></td>
+      <td class="num">${m.age_alb ?? '—'}</td>
+      <td>${m.age_bracket || '—'}</td>
+      <td class="num">${fmtNum(m.base_premium)}</td>
+      <td class="num">${parseFloat(m.maternity_premium) > 0 ? fmtNum(m.maternity_premium) : '—'}</td>
+      <td class="num">${parseFloat(m.gross_loading) > 0 ? fmtNum(m.gross_loading) : '—'}</td>
+      <td class="num"><strong>${fmtNum(m.final_premium)}</strong></td>
+      <td style="white-space:nowrap">
+        <button class="mem-edit-btn" onclick="openMemberModal(${m.id})">Edit</button>
+        <button class="mem-del-btn"  onclick="deleteMember(${m.id},'${(m.name||'').replace(/'/g,"\\'")}')">Del</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Member CRUD ────────────────────────────────────────────────────────────────
+let _membersCache    = [];
+let _policyCategories = [];
+let _editMemberId    = null;   // null = adding, int = editing
+
+function openMemberModal(memberId) {
+  _editMemberId = memberId;
+  const modal = document.getElementById('memberModal');
+
+  // Populate category dropdown from this policy's categories
+  const catSel = document.getElementById('mCategory');
+  catSel.innerHTML = _policyCategories.map(c => `<option value="${c}">${c}</option>`).join('');
+
+  if (memberId) {
+    // Edit — pre-fill from cached member data
+    document.getElementById('memberModalTitle').textContent = 'Edit Member';
+    document.getElementById('mSaveBtn').textContent = 'Save Changes';
+    const m = _membersCache.find(x => x.id === memberId);
+    if (m) {
+      document.getElementById('mName').value    = m.name || '';
+      document.getElementById('mDob').value     = (m.dob || '').slice(0, 10);
+      document.getElementById('mGender').value  = m.gender || 'Male';
+      document.getElementById('mMarital').value = m.marital_status || 'Single';
+      document.getElementById('mRelation').value = m.relation || 'Employee';
+      document.getElementById('mCategory').value = m.category || '';
+      document.getElementById('mEmirate').value  = m.emirate || 'Dubai';
+      document.getElementById('mLoading').value  = m.gross_loading || 0;
+    }
+  } else {
+    // Add — clear form
+    document.getElementById('memberModalTitle').textContent = 'Add Member';
+    document.getElementById('mSaveBtn').textContent = 'Add Member';
+    document.getElementById('mName').value     = '';
+    document.getElementById('mDob').value      = '';
+    document.getElementById('mGender').value   = 'Male';
+    document.getElementById('mMarital').value  = 'Single';
+    document.getElementById('mRelation').value = 'Employee';
+    document.getElementById('mCategory').value = _policyCategories[0] || '';
+    document.getElementById('mEmirate').value  = 'Dubai';
+    document.getElementById('mLoading').value  = 0;
+  }
+
+  modal.classList.add('open');
+  document.getElementById('mName').focus();
+}
+
+function closeMemberModal() {
+  document.getElementById('memberModal').classList.remove('open');
+}
+
+async function saveMember() {
+  const btn = document.getElementById('mSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  const payload = {
+    name:           document.getElementById('mName').value.trim(),
+    dob:            document.getElementById('mDob').value,
+    gender:         document.getElementById('mGender').value,
+    marital_status: document.getElementById('mMarital').value,
+    relation:       document.getElementById('mRelation').value,
+    category:       document.getElementById('mCategory').value,
+    emirate:        document.getElementById('mEmirate').value,
+    gross_loading:  parseFloat(document.getElementById('mLoading').value) || 0,
+  };
+
+  if (!payload.name) { toast('Name is required', 'err'); btn.disabled = false; btn.textContent = _editMemberId ? 'Save Changes' : 'Add Member'; return; }
+  if (!payload.dob)  { toast('Date of birth is required', 'err'); btn.disabled = false; btn.textContent = _editMemberId ? 'Save Changes' : 'Add Member'; return; }
+
+  const url    = _editMemberId
+    ? `/api/policies/${PID}/members/${_editMemberId}`
+    : `/api/policies/${PID}/members`;
+  const method = _editMemberId ? 'PUT' : 'POST';
+
+  try {
+    const res  = await fetch(url, {
+      method, headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || 'Save failed', 'err');
+    } else {
+      closeMemberModal();
+      toast(_editMemberId ? 'Member updated ✓' : 'Member added ✓');
+      loadDetail();
+    }
+  } catch(e) {
+    toast('Network error', 'err');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = _editMemberId ? 'Save Changes' : 'Add Member';
+  }
+}
+
+async function deleteMember(mid, name) {
+  if (!confirm(`Remove "${name}" from this policy?\n\nPremium totals will be updated automatically.`)) return;
+  try {
+    const res  = await fetch(`/api/policies/${PID}/members/${mid}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || 'Delete failed', 'err');
+    } else {
+      toast('Member removed ✓');
+      loadDetail();
+    }
+  } catch(e) {
+    toast('Network error', 'err');
+  }
+}
+
+// ── Edit Rates ─────────────────────────────────────────────────────────────────
+let _ratesEditMode = false;
+
+function startEditRates() {
+  _ratesEditMode = true;
+  document.getElementById('ratesEditBtn').style.display   = 'none';
+  document.getElementById('ratesSaveBtn').style.display   = '';
+  document.getElementById('ratesCancelBtn').style.display = '';
+
+  document.querySelectorAll('[data-rate-val]').forEach(el => {
+    const inp = document.createElement('input');
+    inp.type      = 'number';
+    inp.className = 'rate-input' + (el.dataset.matInput ? ' mat-input' : '');
+    inp.value     = el.dataset.rateVal;
+    inp.min       = '0';
+    inp.step      = '0.01';
+    inp.dataset.rateId   = el.dataset.rateId   || '';
+    inp.dataset.rateType = el.dataset.rateType || '';
+    inp.dataset.catId    = el.dataset.catId    || '';
+    el.replaceWith(inp);
+  });
+}
+
+function cancelEditRates() {
+  _ratesEditMode = false;
+  document.getElementById('ratesEditBtn').style.display   = '';
+  document.getElementById('ratesSaveBtn').style.display   = 'none';
+  document.getElementById('ratesCancelBtn').style.display = 'none';
+  loadDetail();
+}
+
+async function saveRates() {
+  const saveBtn  = document.getElementById('ratesSaveBtn');
+  const cancelBtn = document.getElementById('ratesCancelBtn');
+  const savingEl = document.getElementById('ratesSaving');
+  saveBtn.disabled = cancelBtn.disabled = true;
+  saveBtn.style.display = 'none';
+  savingEl.style.display = 'flex';
+
+  const catMap = {};
+  document.querySelectorAll('input.rate-input').forEach(inp => {
+    const rateType = inp.dataset.rateType;
+    const val      = parseFloat(inp.value) || 0;
+    const catId    = inp.dataset.catId;
+    const brId     = inp.dataset.rateId;
+    if (!catMap[catId]) catMap[catId] = {id: parseInt(catId), maternity_rate: 0, brackets: {}};
+    if (rateType === 'maternity') {
+      catMap[catId].maternity_rate = val;
+    } else {
+      if (!catMap[catId].brackets[brId]) catMap[catId].brackets[brId] = {id: parseInt(brId), male_rate: 0, female_rate: 0};
+      catMap[catId].brackets[brId][rateType + '_rate'] = val;
+    }
+  });
+
+  const payload = {
+    categories: Object.values(catMap).map(cat => ({
+      id: cat.id, maternity_rate: cat.maternity_rate,
+      brackets: Object.values(cat.brackets),
+    }))
+  };
+
+  try {
+    const res  = await fetch(`/api/policies/${PID}/rates`, {
+      method: 'PUT', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || 'Save failed', 'err');
+      saveBtn.disabled = cancelBtn.disabled = false;
+      saveBtn.style.display = ''; savingEl.style.display = 'none';
+    } else {
+      toast('Rates updated & premiums recalculated ✓');
+      _ratesEditMode = false; loadDetail();
+    }
+  } catch(e) {
+    toast('Network error', 'err');
+    saveBtn.disabled = cancelBtn.disabled = false;
+    saveBtn.style.display = ''; savingEl.style.display = 'none';
+  }
+}
+
+// ── Census upload ──────────────────────────────────────────────────────────────
+function triggerCensusUpload() {
+  document.getElementById('censusFileInput').value = '';
+  document.getElementById('censusFileInput').click();
+}
+
+async function uploadCensus(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const memberCount = parseInt(document.getElementById('memCount').textContent) || 0;
+  if (!confirm(
+    `Replace all ${memberCount} members with "${file.name}"?\n\n` +
+    `Premiums will be recalculated using the existing rates.\n\nThis cannot be undone.`
+  )) return;
+
+  const statusEl    = document.getElementById('censusStatus');
+  const progressWr  = document.getElementById('censusProgress');
+  const progressBar = document.getElementById('censusBar');
+  statusEl.textContent    = 'Uploading…';
+  progressWr.style.display = 'block';
+  progressBar.style.width  = '40%';
+
+  const fd = new FormData();
+  fd.append('census', file);
+  try {
+    progressBar.style.width = '70%';
+    const res  = await fetch(`/api/policies/${PID}/census`, {method:'POST', body:fd});
+    const data = await res.json();
+    progressBar.style.width = '100%';
+    if (!res.ok) {
+      toast(data.error || 'Upload failed', 'err');
+    } else {
+      toast(`Census replaced — ${data.member_count} members loaded ✓`);
+      loadDetail();
+    }
+    statusEl.textContent = ''; progressWr.style.display = 'none';
+  } catch(e) {
+    toast('Network error', 'err');
+    statusEl.textContent = ''; progressWr.style.display = 'none';
+  }
+}
+
+// ── Download / Regenerate Premium Summary ─────────────────────────────────────
+async function downloadSummary() {
+  const btn = document.getElementById('detailDlBtn');
+  btn.disabled    = true;
+  btn.textContent = '⏳ Generating…';
+  try {
+    const res = await fetch(`/api/policies/${PID}/export`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast('Export failed: ' + (err.error || res.statusText), 'err');
+      return;
+    }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    const cd   = res.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const company = (document.getElementById('phCompany').textContent || 'Policy').trim();
+    a.download = match ? match[1] : `Premium Summary - ${company}.xlsx`;
+    a.href = url;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('Summary downloaded ✓');
+  } catch(e) {
+    toast('Network error', 'err');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '⬇ Download Summary';
+  }
+}
+
+loadDetail();
+</script>
+</body>
+</html>

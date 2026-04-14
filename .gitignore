@@ -1,0 +1,7 @@
+quotes.db
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+.claude/
