@@ -2661,7 +2661,7 @@ def page_extracted_info():
         major_claims = st.number_input(
             "Major Claims Allowance (AED)",
             value=st.session_state.get("major_claims_allowance", 0.0),
-            min_value=0.0, step=1000.0, format="%,.0f", key="ei_major_claims",
+            min_value=0.0, step=1000.0, key="ei_major_claims",
             help="Manual entry for unaccounted claims (newly diagnosed, newly added high-cost members)",
         )
         st.session_state["major_claims_allowance"] = major_claims
