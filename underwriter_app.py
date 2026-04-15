@@ -26,6 +26,7 @@ import io
 import re
 import os
 import math
+import copy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -1530,6 +1531,49 @@ def setup_page():
     }
 
     /* ── Hide Streamlit branding ───────────────────────────────────────────── */
+    /* ── User-corrected field badge ──────────────────────────────────────── */
+    .user-corrected {
+        border-left: 3px solid var(--orange);
+        padding-left: 8px;
+        background: rgba(251, 155, 53, 0.06);
+        border-radius: 0 6px 6px 0;
+        margin: 2px 0;
+        font-size: 0.73rem;
+        color: var(--orange);
+        font-weight: 600;
+    }
+
+    /* ── Data bar for monthly claims ──────────────────────────────────────── */
+    .data-bar-bg {
+        background: rgba(53,197,252,0.12);
+        border-radius: 4px;
+        height: 22px;
+        width: 100%;
+        overflow: hidden;
+    }
+    .data-bar-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+    .data-bar-fill.blue {
+        background: linear-gradient(90deg, #35c5fc, #003780);
+    }
+    .data-bar-fill.warm {
+        background: linear-gradient(90deg, #fb9b35, #f1517b);
+    }
+
+    /* ── Monthly claims row header ───────────────────────────────────────── */
+    .monthly-header {
+        font-family: 'Raleway', sans-serif;
+        font-size: 0.68rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--navy);
+        padding: 8px 0;
+    }
+
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     </style>
@@ -1561,9 +1605,15 @@ def render_sidebar():
 
         st.markdown("---")
 
+        nav_options = ["📝 New Quote", "📋 Extracted Information", "🔄 Revisions", "📊 Dashboard"]
+        # Auto-select Extracted Information page when extraction is pending
+        default_idx = nav_options.index(st.session_state.get("active_page", "📝 New Quote")) \
+            if st.session_state.get("active_page") in nav_options else 0
+
         page = st.radio(
             "Navigation",
-            ["📝 New Quote", "🔄 Revisions", "📊 Dashboard"],
+            nav_options,
+            index=default_idx,
             label_visibility="collapsed",
         )
 
@@ -1902,13 +1952,15 @@ def page_new_quote():
 
     # ── Company, Broker & Plan ──
     st.markdown('<div class="section-lbl">Client &amp; Broker</div>', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         company_name = st.text_input("Company / Employer Name", placeholder="e.g. United Bank Limited")
     with col2:
         broker_name = st.text_input("Broker Name", placeholder="e.g. Marsh McLennan")
     with col3:
         plan = st.selectbox("Plan", PLAN_OPTIONS, index=0)
+    with col4:
+        underwriter = st.selectbox("Underwriter", ["Jasper", "Mabel", "Joseph", "Angela"])
 
     # ── Dynamic Commissions based on selected plan ──
     st.markdown('<div class="section-lbl">Commissions &amp; Margins</div>', unsafe_allow_html=True)
@@ -1986,26 +2038,28 @@ def page_new_quote():
                 if not data:
                     return
 
-                st.success("Report extracted successfully!")
+                st.success("Report extracted successfully! Redirecting to review...")
 
-                # Run SOP analysis — use uploaded census count if available
-                uploaded_count = census_analysis["total_members"] if census_analysis else 0
-                summary = run_sop_analysis(data, commissions, company_name, plan, uploaded_count)
-
-                # Store in session for saving
+                # Store raw extraction and initialize editable copy
                 st.session_state["last_extract"] = data
-                st.session_state["last_summary"] = summary
+                st.session_state["editable_extract"] = copy.deepcopy(data)
                 st.session_state["last_commissions"] = commissions
                 st.session_state["last_company"] = company_name
                 st.session_state["last_broker"] = broker_name
                 st.session_state["last_plan"] = plan
+                st.session_state["last_underwriter"] = underwriter
+                st.session_state["user_corrections"] = {}
 
-                # Display census analysis first if available
-                if census_analysis:
-                    display_census_analysis(census_analysis)
+                # Initialize monthly controls
+                monthly = data.get("monthly_claims", [])
+                st.session_state["monthly_included"] = [
+                    float(m.get("value", 0) or 0) > 0 for m in monthly
+                ]
+                st.session_state["monthly_haircuts"] = [0.0] * len(monthly)
 
-                # Display DHA results
-                display_summary(summary, data)
+                # Redirect to Extracted Information page
+                st.session_state["active_page"] = "📋 Extracted Information"
+                st.rerun()
 
             elif file_ext in ("xlsx", "xls", "csv"):
                 try:
@@ -2087,6 +2141,445 @@ def page_new_quote():
         # View raw extraction
         with st.expander("🔍 View Raw Extracted Data (JSON)"):
             st.json(st.session_state["last_extract"])
+
+
+# ---------------------------------------------------------------------------
+# PAGE: EXTRACTED INFORMATION — review, edit, haircut, and confirm
+# ---------------------------------------------------------------------------
+
+def calculate_live_premium(data: dict, commissions: dict, included: list, haircuts: list,
+                           census_count: int) -> dict:
+    """
+    Lightweight live premium calculator that mirrors the core math from
+    run_sop_analysis but only returns the key numbers for display.
+    Runs on every Streamlit rerun so the user sees instant feedback.
+    """
+    monthly = data.get("monthly_claims", [])
+
+    # Build net values for included months only
+    net_values = []
+    for i, m in enumerate(monthly):
+        val = float(m.get("value", 0) or 0)
+        if i < len(included) and included[i] and val > 0:
+            net = max(val - (haircuts[i] if i < len(haircuts) else 0), 0)
+            net_values.append(net)
+
+    n_incurred = len(net_values)
+
+    # Determine policy start day
+    policy_eff = parse_date_flexible(data.get("policy_effective_date", ""))
+    policy_start_day = policy_eff.day if policy_eff else 1
+
+    # Three-average method
+    if n_incurred >= 3:
+        if policy_start_day <= 5:
+            avg_a = sum(net_values) / len(net_values)
+            avg_b = sum(net_values[:-1]) / len(net_values[:-1]) if len(net_values) > 1 else avg_a
+            avg_c = sum(net_values[:-2]) / len(net_values[:-2]) if len(net_values) > 2 else avg_b
+        else:
+            excl = net_values[1:]
+            avg_a = sum(excl) / len(excl) if excl else 0
+            excl2 = net_values[1:-1]
+            avg_b = sum(excl2) / len(excl2) if excl2 else avg_a
+            excl3 = net_values[1:-2]
+            avg_c = sum(excl3) / len(excl3) if excl3 else avg_b
+    elif n_incurred > 0:
+        avg_a = avg_b = avg_c = sum(net_values) / len(net_values)
+    else:
+        avg_a = avg_b = avg_c = 0
+
+    highest_avg = max(avg_a, avg_b, avg_c)
+
+    # Census from DHA report for burning cost denominator
+    def sum_census(census_data):
+        if not census_data:
+            return 0
+        total = census_data.get("grand_total", 0)
+        if total:
+            return int(total)
+        s = 0
+        for cat in ("male", "single_female", "married_female"):
+            cat_data = census_data.get(cat, {})
+            if isinstance(cat_data, dict):
+                cat_total = cat_data.get("total", 0)
+                if cat_total:
+                    s += int(cat_total)
+                else:
+                    for k, v in cat_data.items():
+                        if k != "total":
+                            s += int(v or 0)
+            elif isinstance(cat_data, (int, float)):
+                s += int(cat_data)
+        return s
+
+    cs = sum_census(data.get("census_start"))
+    ce = sum_census(data.get("census_end"))
+    avg_census = (cs + ce) / 2 if (cs + ce) > 0 else 1
+
+    burning_cost = highest_avg / avg_census if avg_census > 0 else 0
+
+    # Adjustments
+    claims_paid = float(data.get("claims_paid", 0) or 0)
+    claims_outstanding = float(data.get("claims_outstanding", 0) or 0)
+    member_type = data.get("claims_by_member_type", {})
+    totals_row = member_type.get("totals", member_type.get("Totals", {}))
+    ip_total = float(totals_row.get("ip", 0) or 0)
+    claims_total_s8 = float(totals_row.get("total", 0) or 0)
+    ip_ratio = (ip_total / claims_total_s8 * 100) if claims_total_s8 > 0 else 0
+    outstanding_ratio = (claims_outstanding / claims_paid * 100) if claims_paid > 0 else 0
+
+    inflation = 0.05
+    ip_adj = (25 - ip_ratio) / 100 if ip_ratio < 20 else 0
+    out_adj = (outstanding_ratio - 20) / 100 if outstanding_ratio > 20 else 0
+    adjusted = burning_cost * (1 + inflation + ip_adj + out_adj)
+
+    # Premium
+    current = census_count if census_count > 0 else (ce if ce > 0 else cs)
+    projected = adjusted * 12 * current
+    total_comm = sum(commissions.values()) / 100
+    indicative = projected / (1 - total_comm) if total_comm < 1 else projected
+
+    return {
+        "avg_a": round(avg_a, 2),
+        "avg_b": round(avg_b, 2),
+        "avg_c": round(avg_c, 2),
+        "highest_avg": round(highest_avg, 2),
+        "avg_census": round(avg_census, 2),
+        "burning_cost": round(burning_cost, 2),
+        "adjusted": round(adjusted, 2),
+        "projected": round(projected, 2),
+        "indicative": round(indicative, 2),
+        "current_census": current,
+        "n_months": n_incurred,
+    }
+
+
+def page_extracted_info():
+    """Review extracted data, edit corrections, set haircuts, and confirm analysis."""
+
+    # ── Guard ──
+    if "editable_extract" not in st.session_state:
+        st.markdown("""
+        <div class="info-box">
+            <strong>No extraction data available.</strong><br>
+            Go to <strong>New Quote</strong> and upload a DHA report to get started.
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    data = st.session_state["editable_extract"]
+    original = st.session_state.get("last_extract", {})
+    corrections = st.session_state.get("user_corrections", {})
+
+    # ── Page header ──
+    st.markdown("""
+    <div style="background:#000; border-radius:14px; overflow:hidden; margin-bottom:28px;">
+        <div style="height:3px; background:linear-gradient(90deg,#fb9b35,#f1517b,#b43082,#8431cb,#35c5fc);"></div>
+        <div style="padding:22px 28px;">
+            <div style="font-family:'Raleway',sans-serif; font-weight:900; font-size:0.6rem;
+                        letter-spacing:3px; text-transform:uppercase;
+                        background:linear-gradient(90deg,#fb9b35,#f1517b,#b43082,#8431cb,#35c5fc);
+                        -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                        margin-bottom:6px;">WellX</div>
+            <div style="font-family:'Raleway',sans-serif; font-weight:800; font-size:1.3rem;
+                        color:#fff; line-height:1.2; margin-bottom:4px;">
+                Extracted Information
+                <span style="display:block; font-size:0.85rem; font-weight:500;
+                             color:rgba(255,255,255,0.45); font-family:'Inter',sans-serif; margin-top:4px;">
+                    Review AI extraction, correct errors, and set claims haircuts
+                </span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Helper to track corrections ──
+    def track_correction(field_key, new_val):
+        orig_val = original.get(field_key, "")
+        if str(new_val) != str(orig_val):
+            corrections[field_key] = {"original": orig_val, "corrected": new_val}
+        elif field_key in corrections:
+            del corrections[field_key]
+        st.session_state["user_corrections"] = corrections
+
+    # =======================================================================
+    # SECTION A: Employer & Dates
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Employer &amp; Policy Dates</div>', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        emp = st.text_input("Employer Name", value=data.get("employer_name", ""), key="ei_employer")
+        data["employer_name"] = emp
+        track_correction("employer_name", emp)
+        if "employer_name" in corrections:
+            st.markdown(f'<div class="user-corrected">✏️ Corrected (was: {corrections["employer_name"]["original"]})</div>', unsafe_allow_html=True)
+
+    with col2:
+        notes = data.get("extraction_notes", "")
+        if notes:
+            st.markdown(f'<div class="info-box">{notes}</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+    date_fields = [
+        ("policy_effective_date", "Policy Effective Date"),
+        ("policy_expiry_date", "Policy Expiry Date"),
+        ("report_period_end", "Report Period End"),
+    ]
+    for (key, label), col in zip(date_fields, [col1, col2, col3]):
+        with col:
+            val = st.text_input(label, value=data.get(key, ""), key=f"ei_{key}")
+            data[key] = val
+            track_correction(key, val)
+            if key in corrections:
+                st.markdown(f'<div class="user-corrected">✏️ Corrected</div>', unsafe_allow_html=True)
+
+    # =======================================================================
+    # SECTION B: Claims Values
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Claims Values (AED)</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+    claims_fields = [
+        ("claims_paid", "Claims Paid"),
+        ("claims_outstanding", "Claims Outstanding"),
+        ("claims_ibnr", "Claims IBNR"),
+    ]
+    for (key, label), col in zip(claims_fields, [col1, col2, col3]):
+        with col:
+            val = st.number_input(
+                label,
+                value=float(data.get(key, 0) or 0),
+                min_value=0.0,
+                step=1000.0,
+                key=f"ei_{key}",
+            )
+            data[key] = val
+            track_correction(key, val)
+            if key in corrections:
+                st.markdown(f'<div class="user-corrected">✏️ Corrected (was: {corrections[key]["original"]:,.0f})</div>', unsafe_allow_html=True)
+
+    # =======================================================================
+    # SECTION C: Monthly Claims with Checkboxes, Haircuts, Data Bars
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Monthly Claims (Section 17)</div>', unsafe_allow_html=True)
+
+    monthly = data.get("monthly_claims", [])
+    included = st.session_state.get("monthly_included", [True] * len(monthly))
+    haircuts = st.session_state.get("monthly_haircuts", [0.0] * len(monthly))
+
+    if monthly:
+        # Column headers
+        hdr = st.columns([0.6, 1.5, 2.0, 2.5, 2.0, 2.0, 2.5])
+        headers = ["Include", "Month", "Claims (AED)", "Claims Bar", "Haircut (AED)", "Net Claims", "Net Bar"]
+        for h, col in zip(headers, hdr):
+            with col:
+                st.markdown(f'<div class="monthly-header">{h}</div>', unsafe_allow_html=True)
+
+        # Compute max for data bar scaling
+        all_vals = [float(m.get("value", 0) or 0) for m in monthly]
+        max_val = max(all_vals) if all_vals else 1
+
+        for i, m in enumerate(monthly):
+            cols = st.columns([0.6, 1.5, 2.0, 2.5, 2.0, 2.0, 2.5])
+            val = float(m.get("value", 0) or 0)
+
+            with cols[0]:
+                inc = st.checkbox(
+                    "Inc", value=included[i] if i < len(included) else True,
+                    key=f"mi_{i}", label_visibility="collapsed",
+                )
+                st.session_state["monthly_included"][i] = inc
+
+            with cols[1]:
+                st.markdown(f"**{m.get('month', '')}** {m.get('year', '')}")
+
+            with cols[2]:
+                new_val = st.number_input(
+                    "val", value=val, min_value=0.0, step=1000.0,
+                    key=f"mv_{i}", label_visibility="collapsed",
+                )
+                data["monthly_claims"][i]["value"] = new_val
+                # Track correction
+                orig_m = original.get("monthly_claims", [])
+                if i < len(orig_m) and new_val != float(orig_m[i].get("value", 0) or 0):
+                    corrections[f"monthly_{i}"] = {
+                        "original": orig_m[i].get("value", 0),
+                        "corrected": new_val,
+                    }
+                val = new_val  # Use updated value
+
+            with cols[3]:
+                pct = (val / max_val * 100) if max_val > 0 else 0
+                st.markdown(
+                    f'<div class="data-bar-bg">'
+                    f'<div class="data-bar-fill blue" style="width:{pct:.1f}%;"></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            with cols[4]:
+                hc = st.number_input(
+                    "hc", value=haircuts[i] if i < len(haircuts) else 0.0,
+                    min_value=0.0, step=1000.0,
+                    key=f"mh_{i}", label_visibility="collapsed",
+                )
+                st.session_state["monthly_haircuts"][i] = hc
+
+            with cols[5]:
+                net = max(val - hc, 0)
+                color = "#155724" if inc else "#9aa5b4"
+                strike = "" if inc else "text-decoration:line-through;"
+                st.markdown(
+                    f'<div style="font-weight:700; color:{color}; {strike} padding-top:8px;">'
+                    f'AED {net:,.0f}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            with cols[6]:
+                net_pct = (net / max_val * 100) if max_val > 0 else 0
+                bar_class = "warm" if inc else "blue"
+                opacity = "1" if inc else "0.3"
+                st.markdown(
+                    f'<div class="data-bar-bg" style="opacity:{opacity};">'
+                    f'<div class="data-bar-fill {bar_class}" style="width:{max(net_pct, 0):.1f}%;"></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+    # =======================================================================
+    # SECTION D: Diagnosis Top 10
+    # =======================================================================
+    diag_vals = data.get("diagnosis_top10_values", [])
+    if diag_vals:
+        with st.expander("📊 Diagnosis Top 10 (editable)"):
+            diag_df = pd.DataFrame(diag_vals)
+            edited_diag = st.data_editor(diag_df, use_container_width=True, key="ei_diag")
+            data["diagnosis_top10_values"] = edited_diag.to_dict("records")
+
+    # =======================================================================
+    # SECTION E: Live Premium Calculator
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Live Premium Estimate</div>', unsafe_allow_html=True)
+
+    commissions = st.session_state.get("last_commissions", {})
+    census_analysis = st.session_state.get("last_census_analysis")
+    census_count = census_analysis["total_members"] if census_analysis else 0
+
+    live = calculate_live_premium(
+        data, commissions,
+        st.session_state.get("monthly_included", []),
+        st.session_state.get("monthly_haircuts", []),
+        census_count,
+    )
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        render_metric("Months Used", live["n_months"], currency=False)
+    with col2:
+        render_metric("Monthly Burning Cost", live["highest_avg"])
+    with col3:
+        render_metric("Burning Cost/Capita", live["burning_cost"])
+    with col4:
+        render_metric("Projected Claims", live["projected"])
+    with col5:
+        st.markdown(f"""
+        <div class="premium-hero" style="padding:16px 18px;">
+            <div class="ph-label" style="font-size:0.65rem;">Live Indicative Premium</div>
+            <div class="ph-value" style="font-size:1.3rem;">AED {live['indicative']:,.2f}</div>
+            <div class="ph-sub">Census: {live['current_census']} | Avg: {live['avg_census']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # =======================================================================
+    # SECTION F: Correction Summary
+    # =======================================================================
+    if corrections:
+        st.markdown(
+            f'<div class="badge-warn">✏️ {len(corrections)} field(s) manually corrected by underwriter</div>',
+            unsafe_allow_html=True,
+        )
+
+    # =======================================================================
+    # SECTION G: Confirm & Analyze
+    # =======================================================================
+    st.markdown("---")
+
+    if st.button("✅ Confirm & Run Full Analysis", type="primary", use_container_width=True):
+        # Build modified monthly claims with haircuts and exclusions applied
+        final_monthly = []
+        for i, m in enumerate(data.get("monthly_claims", [])):
+            val = float(m.get("value", 0) or 0)
+            inc = st.session_state["monthly_included"][i] if i < len(st.session_state.get("monthly_included", [])) else True
+            hc = st.session_state["monthly_haircuts"][i] if i < len(st.session_state.get("monthly_haircuts", [])) else 0
+            if inc:
+                net = max(val - hc, 0)
+            else:
+                net = 0  # Excluded months → 0 so they're filtered out
+            final_monthly.append({"month": m.get("month"), "year": m.get("year"), "value": net})
+
+        analysis_data = copy.deepcopy(data)
+        analysis_data["monthly_claims"] = final_monthly
+
+        company = st.session_state.get("last_company", "")
+        plan = st.session_state.get("last_plan", "HealthX-QIC")
+        uploaded_count = census_count
+
+        summary = run_sop_analysis(analysis_data, commissions, company, plan, uploaded_count)
+        st.session_state["last_summary"] = summary
+        st.session_state["active_page"] = "📋 Extracted Information"
+
+        # Display census analysis if available
+        if census_analysis:
+            display_census_analysis(census_analysis)
+
+        # Display full results
+        display_summary(summary, analysis_data)
+
+        # ── Post-analysis actions ──
+        st.markdown('<div class="section-lbl">Actions</div>', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            excel_bytes = generate_quote_excel(summary, analysis_data, commissions)
+            st.download_button(
+                label="📥 Download Full Quote Excel",
+                data=excel_bytes,
+                file_name=f"WellX_Quote_{company}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        with col2:
+            status = st.selectbox(
+                "Quote Status",
+                ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"],
+                index=0,
+                key="ei_status",
+            )
+
+        with col3:
+            if st.button("💾 Save Quote", use_container_width=True, key="ei_save"):
+                comm_broker = commissions.get("Broker", 10)
+                comm_insurer = commissions.get("Insurance Tax", 0.5)
+                comm_tpa = commissions.get("NAS", 4)
+                comm_wellx = commissions.get("HealthX", commissions.get("OpenX", 4))
+                comm_margins = commissions.get("Reinsurance Margin", 7)
+                quote_data = {
+                    "company_name": company,
+                    "broker_name": st.session_state.get("last_broker", ""),
+                    "status": status,
+                    "summary": summary,
+                    "raw_extract": analysis_data,
+                    "commission_broker": comm_broker,
+                    "commission_insurer": comm_insurer,
+                    "commission_tpa": comm_tpa,
+                    "commission_wellx": comm_wellx,
+                    "commission_margins": comm_margins,
+                    "burning_cost": summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"],
+                    "indicative_premium": summary["premium_quotation"]["indicative_premium"],
+                    "current_census": summary["premium_quotation"]["current_census"],
+                }
+                quote_id = save_quote(quote_data)
+                st.success(f"Quote saved! (ID: {quote_id})")
 
 
 # ---------------------------------------------------------------------------
@@ -2334,6 +2827,8 @@ def main():
 
     if page == "📝 New Quote":
         page_new_quote()
+    elif page == "📋 Extracted Information":
+        page_extracted_info()
     elif page == "🔄 Revisions":
         page_revisions()
     elif page == "📊 Dashboard":
