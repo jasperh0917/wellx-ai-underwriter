@@ -250,6 +250,13 @@ Return a list of objects in order: [{month: str, year: number, value: number}, .
 Include ALL 12 months (17a through 17l). Use 0 for months with no data.
 Label months clearly: e.g. "MAY", "JUNE", etc.
 
+SECTION 19 — Complex Cases (CRITICAL — often unlabelled, look just below Section 18)
+Look for any section after Section 18 that lists complex or ongoing cases.
+It may be titled "COMPLEX CASES", "ONGOING CASES", or have no title at all.
+Extract any text found here as a string. Look for conditions like:
+Neoplasms, Polycythemia Vera, Myelodysplastic Syndromes, Cancer, Chemotherapy, etc.
+Return as: "complex_cases_notes": "full text of section 19 or empty string if not found"
+
 === IMPORTANT PARSING RULES ===
 
 1. Numbers: Remove commas, convert to numeric. "3,095,350" → 3095350
@@ -283,6 +290,7 @@ Return ONLY a valid JSON object with this top-level structure:
   "provider_top10_values": [ ... ],
   "provider_top10_counts": [ ... ],
   "monthly_claims": [ ... ],
+  "complex_cases_notes": "",
   "non_standard_format": false,
   "extraction_notes": "Any notes about data quality, missing sections, etc."
 }
@@ -1952,15 +1960,19 @@ def page_new_quote():
 
     # ── Company, Broker & Plan ──
     st.markdown('<div class="section-lbl">Client &amp; Broker</div>', unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         company_name = st.text_input("Company / Employer Name", placeholder="e.g. United Bank Limited")
     with col2:
         broker_name = st.text_input("Broker Name", placeholder="e.g. Marsh McLennan")
     with col3:
         plan = st.selectbox("Plan", PLAN_OPTIONS, index=0)
+
+    col4, col5 = st.columns(2)
     with col4:
         underwriter = st.selectbox("Underwriter", ["Jasper", "Mabel", "Joseph", "Angela"])
+    with col5:
+        rm_person = st.selectbox("RM", ["Heston", "Mark", "Sujith"])
 
     # ── Dynamic Commissions based on selected plan ──
     st.markdown('<div class="section-lbl">Commissions &amp; Margins</div>', unsafe_allow_html=True)
@@ -2048,6 +2060,7 @@ def page_new_quote():
                 st.session_state["last_broker"] = broker_name
                 st.session_state["last_plan"] = plan
                 st.session_state["last_underwriter"] = underwriter
+                st.session_state["last_rm"] = rm_person
                 st.session_state["user_corrections"] = {}
 
                 # Initialize monthly controls
@@ -2056,6 +2069,40 @@ def page_new_quote():
                     float(m.get("value", 0) or 0) > 0 for m in monthly
                 ]
                 st.session_state["monthly_haircuts"] = [0.0] * len(monthly)
+
+                # Auto-tick months per SOP: determine which set gives highest average
+                # and pre-select those months
+                vals = [float(m.get("value", 0) or 0) for m in monthly]
+                incurred_idx = [i for i, v in enumerate(vals) if v > 0]
+                policy_eff_dt = parse_date_flexible(data.get("policy_effective_date", ""))
+                psd = policy_eff_dt.day if policy_eff_dt else 1
+
+                if len(incurred_idx) >= 3:
+                    if psd <= 5:
+                        sets = [incurred_idx, incurred_idx[:-1], incurred_idx[:-2]]
+                    else:
+                        sets = [incurred_idx[1:], incurred_idx[1:-1], incurred_idx[1:-2]]
+                    avgs = []
+                    for s in sets:
+                        if s:
+                            avgs.append(sum(vals[j] for j in s) / len(s))
+                        else:
+                            avgs.append(0)
+                    best_set = sets[avgs.index(max(avgs))]
+                    auto_included = [False] * len(monthly)
+                    for j in best_set:
+                        auto_included[j] = True
+                    st.session_state["monthly_included"] = auto_included
+
+                # Initialize adjustment overrides
+                st.session_state["adj_inflation"] = 5.0
+                st.session_state["adj_ip"] = None  # None = auto-calculate
+                st.session_state["adj_os"] = None
+                st.session_state["major_claims_allowance"] = 0.0
+                st.session_state["uw_loading_pct"] = 0.0
+                st.session_state["uw_discount_pct"] = 0.0
+                st.session_state["uw_loading_note"] = ""
+                st.session_state["uw_discount_note"] = ""
 
                 # Redirect to Extracted Information page
                 st.session_state["active_page"] = "📋 Extracted Information"
@@ -2148,11 +2195,13 @@ def page_new_quote():
 # ---------------------------------------------------------------------------
 
 def calculate_live_premium(data: dict, commissions: dict, included: list, haircuts: list,
-                           census_count: int) -> dict:
+                           census_count: int, inflation_pct: float = 5.0,
+                           ip_adj_pct: float = None, os_adj_pct: float = None,
+                           major_claims_allowance: float = 0.0,
+                           uw_loading_pct: float = 0.0, uw_discount_pct: float = 0.0) -> dict:
     """
-    Lightweight live premium calculator that mirrors the core math from
-    run_sop_analysis but only returns the key numbers for display.
-    Runs on every Streamlit rerun so the user sees instant feedback.
+    Live premium calculator with editable adjustments, major claims allowance,
+    and UW loading/discount. Runs on every Streamlit rerun for instant feedback.
     """
     monthly = data.get("monthly_claims", [])
 
@@ -2191,7 +2240,7 @@ def calculate_live_premium(data: dict, commissions: dict, included: list, haircu
     highest_avg = max(avg_a, avg_b, avg_c)
 
     # Census from DHA report for burning cost denominator
-    def sum_census(census_data):
+    def sum_census_inner(census_data):
         if not census_data:
             return 0
         total = census_data.get("grand_total", 0)
@@ -2212,13 +2261,13 @@ def calculate_live_premium(data: dict, commissions: dict, included: list, haircu
                 s += int(cat_data)
         return s
 
-    cs = sum_census(data.get("census_start"))
-    ce = sum_census(data.get("census_end"))
+    cs = sum_census_inner(data.get("census_start"))
+    ce = sum_census_inner(data.get("census_end"))
     avg_census = (cs + ce) / 2 if (cs + ce) > 0 else 1
 
     burning_cost = highest_avg / avg_census if avg_census > 0 else 0
 
-    # Adjustments
+    # Adjustments — use overrides if provided
     claims_paid = float(data.get("claims_paid", 0) or 0)
     claims_outstanding = float(data.get("claims_outstanding", 0) or 0)
     member_type = data.get("claims_by_member_type", {})
@@ -2228,16 +2277,29 @@ def calculate_live_premium(data: dict, commissions: dict, included: list, haircu
     ip_ratio = (ip_total / claims_total_s8 * 100) if claims_total_s8 > 0 else 0
     outstanding_ratio = (claims_outstanding / claims_paid * 100) if claims_paid > 0 else 0
 
-    inflation = 0.05
-    ip_adj = (25 - ip_ratio) / 100 if ip_ratio < 20 else 0
-    out_adj = (outstanding_ratio - 20) / 100 if outstanding_ratio > 20 else 0
+    inflation = inflation_pct / 100
+    if ip_adj_pct is not None:
+        ip_adj = ip_adj_pct / 100
+    else:
+        ip_adj = (25 - ip_ratio) / 100 if ip_ratio < 20 else 0
+    if os_adj_pct is not None:
+        out_adj = os_adj_pct / 100
+    else:
+        out_adj = (outstanding_ratio - 20) / 100 if outstanding_ratio > 20 else 0
+
     adjusted = burning_cost * (1 + inflation + ip_adj + out_adj)
 
-    # Premium
+    # Premium calculation
     current = census_count if census_count > 0 else (ce if ce > 0 else cs)
-    projected = adjusted * 12 * current
+    projected = adjusted * 12 * current  # Net premium before loading/discount
     total_comm = sum(commissions.values()) / 100
-    indicative = projected / (1 - total_comm) if total_comm < 1 else projected
+
+    # Apply UW loading or discount on net premium first
+    net_after_uw = projected * (1 + uw_loading_pct / 100 - uw_discount_pct / 100)
+    # Then add major claims allowance
+    adjusted_net = net_after_uw + major_claims_allowance
+
+    indicative = adjusted_net / (1 - total_comm) if total_comm < 1 else adjusted_net
 
     return {
         "avg_a": round(avg_a, 2),
@@ -2245,12 +2307,22 @@ def calculate_live_premium(data: dict, commissions: dict, included: list, haircu
         "avg_c": round(avg_c, 2),
         "highest_avg": round(highest_avg, 2),
         "avg_census": round(avg_census, 2),
+        "census_start": cs,
+        "census_end": ce,
         "burning_cost": round(burning_cost, 2),
-        "adjusted": round(adjusted, 2),
+        "adjusted_bc": round(adjusted, 2),
         "projected": round(projected, 2),
+        "net_after_uw": round(net_after_uw, 2),
+        "major_claims_allowance": round(major_claims_allowance, 2),
+        "adjusted_net": round(adjusted_net, 2),
         "indicative": round(indicative, 2),
         "current_census": current,
         "n_months": n_incurred,
+        "ip_ratio": round(ip_ratio, 2),
+        "outstanding_ratio": round(outstanding_ratio, 2),
+        "inflation_pct": inflation_pct,
+        "ip_adj_pct": round(ip_adj * 100, 2),
+        "os_adj_pct": round(out_adj * 100, 2),
     }
 
 
@@ -2446,7 +2518,90 @@ def page_extracted_info():
                 )
 
     # =======================================================================
-    # SECTION D: Diagnosis Top 10
+    # SECTION D: Census Summary (Report + Uploaded)
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Census Summary</div>', unsafe_allow_html=True)
+
+    census_analysis = st.session_state.get("last_census_analysis")
+    census_count = census_analysis["total_members"] if census_analysis else 0
+
+    # Compute report census from extracted data
+    def _sum_census(census_data):
+        if not census_data:
+            return 0
+        total = census_data.get("grand_total", 0)
+        if total:
+            return int(total)
+        s = 0
+        for cat in ("male", "single_female", "married_female"):
+            cat_data = census_data.get(cat, {})
+            if isinstance(cat_data, dict):
+                ct = cat_data.get("total", 0)
+                s += int(ct) if ct else sum(int(v or 0) for k, v in cat_data.items() if k != "total")
+            elif isinstance(cat_data, (int, float)):
+                s += int(cat_data)
+        return s
+
+    report_start = _sum_census(data.get("census_start"))
+    report_end = _sum_census(data.get("census_end"))
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        render_metric("Report Starting Census", report_start, currency=False)
+    with col2:
+        render_metric("Report Ending Census", report_end, currency=False)
+    with col3:
+        render_metric("Uploaded Census", census_count if census_count > 0 else "N/A", currency=False)
+
+    # Uploaded census age distribution
+    if census_analysis and census_analysis.get("age_distribution"):
+        st.markdown("**Uploaded Census Breakdown:**")
+        ad = census_analysis["age_distribution"]
+        # Remap to required brackets: 0-18, 19-30, 31-40, 41-50, 51-65, Married F (18-45)
+        bracket_data = {}
+        for bracket, info in ad.items():
+            bracket_data[bracket] = info
+
+        # Show employee/dependent + married females + age brackets
+        items = []
+        items.append(f"**Employees:** {census_analysis.get('employees', 0)} ({census_analysis.get('employee_pct', 0)}%)")
+        items.append(f"**Dependents:** {census_analysis.get('dependents', 0)} ({census_analysis.get('dependent_pct', 0)}%)")
+        mf = census_analysis.get("married_females_18_45", 0)
+        mf_pct = census_analysis.get("married_females_18_45_pct", 0)
+        items.append(f"**Married Females (18-45):** {mf} ({mf_pct}%)")
+
+        col_items = st.columns(3)
+        for i, item in enumerate(items):
+            with col_items[i]:
+                st.markdown(item)
+
+        # Age distribution cards
+        if bracket_data:
+            age_cols = st.columns(len(bracket_data))
+            for idx, (bracket, info) in enumerate(bracket_data.items()):
+                with age_cols[idx]:
+                    st.markdown(f"""
+                    <div class="stat-card" style="padding:8px 6px;">
+                        <div class="stat-val" style="font-size:0.95rem;">{info['count']}</div>
+                        <div class="stat-lbl" style="font-size:0.6rem;">{bracket}</div>
+                        <div class="stat-sub">{info['pct']}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # =======================================================================
+    # SECTION D2: Complex Cases (Section 19)
+    # =======================================================================
+    complex_notes = data.get("complex_cases_notes", "")
+    if complex_notes:
+        st.markdown('<div class="section-lbl">Section 19 &mdash; Complex Cases</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="badge-fail">🔴 <strong>COMPLEX CASES DETECTED — Flag to Underwriter</strong></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(f'<div class="info-box">{complex_notes}</div>', unsafe_allow_html=True)
+
+    # =======================================================================
+    # SECTION D3: Diagnosis Top 10
     # =======================================================================
     diag_vals = data.get("diagnosis_top10_values", [])
     if diag_vals:
@@ -2456,22 +2611,115 @@ def page_extracted_info():
             data["diagnosis_top10_values"] = edited_diag.to_dict("records")
 
     # =======================================================================
-    # SECTION E: Live Premium Calculator
+    # SECTION E: Adjustments (editable)
     # =======================================================================
-    st.markdown('<div class="section-lbl">Live Premium Estimate</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-lbl">Adjustments</div>', unsafe_allow_html=True)
 
     commissions = st.session_state.get("last_commissions", {})
-    census_analysis = st.session_state.get("last_census_analysis")
-    census_count = census_analysis["total_members"] if census_analysis else 0
+
+    # First pass to get auto-calculated values for display
+    claims_paid_val = float(data.get("claims_paid", 0) or 0)
+    claims_outstanding_val = float(data.get("claims_outstanding", 0) or 0)
+    member_type_data = data.get("claims_by_member_type", {})
+    totals_r = member_type_data.get("totals", member_type_data.get("Totals", {}))
+    ip_t = float(totals_r.get("ip", 0) or 0)
+    claims_t = float(totals_r.get("total", 0) or 0)
+    auto_ip_ratio = (ip_t / claims_t * 100) if claims_t > 0 else 0
+    auto_ip_adj = (25 - auto_ip_ratio) if auto_ip_ratio < 20 else 0
+    auto_os_ratio = (claims_outstanding_val / claims_paid_val * 100) if claims_paid_val > 0 else 0
+    auto_os_adj = (auto_os_ratio - 20) if auto_os_ratio > 20 else 0
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        adj_inflation = st.number_input(
+            "Inflation %", value=st.session_state.get("adj_inflation", 5.0),
+            min_value=0.0, max_value=50.0, step=0.5, key="ei_inflation",
+        )
+        st.session_state["adj_inflation"] = adj_inflation
+    with col2:
+        adj_ip = st.number_input(
+            f"IP Allowance % (auto: {auto_ip_adj:.2f}%)",
+            value=float(st.session_state.get("adj_ip") if st.session_state.get("adj_ip") is not None else auto_ip_adj),
+            min_value=0.0, max_value=50.0, step=0.5, key="ei_ip_adj",
+        )
+        st.session_state["adj_ip"] = adj_ip
+    with col3:
+        adj_os = st.number_input(
+            f"OS Overflow % (auto: {auto_os_adj:.2f}%)",
+            value=float(st.session_state.get("adj_os") if st.session_state.get("adj_os") is not None else auto_os_adj),
+            min_value=0.0, max_value=100.0, step=0.5, key="ei_os_adj",
+        )
+        st.session_state["adj_os"] = adj_os
+
+    # =======================================================================
+    # SECTION E2: Major Claims Allowance & UW Loading/Discount
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Major Claims Allowance &amp; UW Loading/Discount</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        major_claims = st.number_input(
+            "Major Claims Allowance (AED)",
+            value=st.session_state.get("major_claims_allowance", 0.0),
+            min_value=0.0, step=1000.0, format="%,.0f", key="ei_major_claims",
+            help="Manual entry for unaccounted claims (newly diagnosed, newly added high-cost members)",
+        )
+        st.session_state["major_claims_allowance"] = major_claims
+
+    with col2:
+        uw_loading = st.number_input(
+            "UW Loading %",
+            value=st.session_state.get("uw_loading_pct", 0.0),
+            min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key="ei_uw_loading",
+        )
+        st.session_state["uw_loading_pct"] = uw_loading
+        loading_note = st.text_input(
+            "Loading reason", value=st.session_state.get("uw_loading_note", ""),
+            placeholder="e.g. High-risk industry", key="ei_loading_note",
+        )
+        st.session_state["uw_loading_note"] = loading_note
+
+    with col3:
+        uw_discount = st.number_input(
+            "UW Discount %",
+            value=st.session_state.get("uw_discount_pct", 0.0),
+            min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key="ei_uw_discount",
+        )
+        st.session_state["uw_discount_pct"] = uw_discount
+        discount_note = st.text_input(
+            "Discount reason", value=st.session_state.get("uw_discount_note", ""),
+            placeholder="e.g. Reinsurer approved haircut", key="ei_discount_note",
+        )
+        st.session_state["uw_discount_note"] = discount_note
+
+    # Formula explanation
+    st.markdown(
+        '<div class="info-box">'
+        '<strong>Formula:</strong> (Net Premium × (1 + Loading% − Discount%)) + Major Claims Allowance = Adjusted Net Premium<br>'
+        'Indicative Premium = Adjusted Net Premium / (1 − Total Commission%)'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # =======================================================================
+    # SECTION F: Live Premium Calculator
+    # =======================================================================
+    st.markdown('<div class="section-lbl">Live Premium Estimate</div>', unsafe_allow_html=True)
 
     live = calculate_live_premium(
         data, commissions,
         st.session_state.get("monthly_included", []),
         st.session_state.get("monthly_haircuts", []),
         census_count,
+        inflation_pct=adj_inflation,
+        ip_adj_pct=adj_ip,
+        os_adj_pct=adj_os,
+        major_claims_allowance=major_claims,
+        uw_loading_pct=uw_loading,
+        uw_discount_pct=uw_discount,
     )
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         render_metric("Months Used", live["n_months"], currency=False)
     with col2:
@@ -2479,8 +2727,17 @@ def page_extracted_info():
     with col3:
         render_metric("Burning Cost/Capita", live["burning_cost"])
     with col4:
-        render_metric("Projected Claims", live["projected"])
-    with col5:
+        render_metric("Adjusted BC/Capita", live["adjusted_bc"])
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        render_metric("Net Premium", live["projected"])
+    with col2:
+        render_metric("After UW Adj", live["net_after_uw"],
+                      f"+{uw_loading:.2f}% / -{uw_discount:.2f}%")
+    with col3:
+        render_metric("+ Major Claims", live["major_claims_allowance"])
+    with col4:
         st.markdown(f"""
         <div class="premium-hero" style="padding:16px 18px;">
             <div class="ph-label" style="font-size:0.65rem;">Live Indicative Premium</div>
@@ -2490,7 +2747,7 @@ def page_extracted_info():
         """, unsafe_allow_html=True)
 
     # =======================================================================
-    # SECTION F: Correction Summary
+    # SECTION G: Correction Summary
     # =======================================================================
     if corrections:
         st.markdown(
