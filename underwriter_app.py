@@ -446,7 +446,10 @@ def analyze_census_file(df: pd.DataFrame) -> dict:
         "disallowed_relations": [],
     }
 
+    # Drop fully blank rows before counting
+    df = df.dropna(how="all").reset_index(drop=True)
     total = len(df)
+    result["total_members"] = total
     if total == 0:
         return result
 
