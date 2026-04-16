@@ -264,7 +264,19 @@ Return as: "complex_cases_notes": "full text of section 19 or empty string if no
 3. Missing data: Use null for genuinely missing values, 0 for confirmed zero values.
 4. Section numbers: Look for bold or large section numbers (1, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 17).
 5. If a table spans multiple pages, combine the data.
-6. If the document is NOT a standard DHA report (e.g., custom claims report), extract whatever structured claims data you can find and note "non_standard_format": true.
+6. If the document is NOT a standard DHA report (e.g., MaxHealth Client Performance Analytics, custom claims report), extract whatever structured claims data you can find and note "non_standard_format": true.
+   For MaxHealth reports specifically:
+   - employer_name: from the title page (e.g. "Arab Broadcasting Services FZ-LLC")
+   - policy dates: use the "Incurred Period" dates as policy_effective_date and policy_expiry_date
+   - claims_paid: "Total Paid Claims" or the Totals row from "Total Paid Claims" table
+   - claims_outstanding: "Outstanding Claims" value from Policy Overview
+   - claims_ibnr: Total Incurred minus (Paid + Outstanding), or null if not derivable
+   - claims_by_member_type: from "Claims by Member Type" tables (Employee/Spouse/Dependents)
+   - diagnosis_top10: from "Top 10 Diagnosis Categories" table
+   - provider_top10: from "Top 10 Providers" table
+   - monthly_claims: from "Claims Spend by Month" chart/table
+   - complex_cases_notes: from "Top 5 Claimants" section (member conditions)
+   - census data: use Total Members and any age/gender breakdowns available
 7. For monthly claims (Section 17), months with empty/blank values should be set to 0.
 8. Always look for a "Total" row or column and capture it.
 
@@ -350,7 +362,8 @@ def extract_dha_report_with_claude(api_key: str, pdf_bytes: bytes) -> dict:
     content_blocks.append({
         "type": "text",
         "text": (
-            "Please analyze ALL the pages above. They form a single DHA insurance report. "
+            "Please analyze ALL the pages above. They form a single insurance report "
+            "(it may be a DHA report, MaxHealth Client Performance Analytics, or another format). "
             "Extract every piece of data according to your instructions and return the JSON."
         ),
     })
@@ -2429,7 +2442,11 @@ def page_extracted_info():
             data[key] = val
             track_correction(key, val)
             if key in corrections:
-                st.markdown(f'<div class="user-corrected">✏️ Corrected (was: {corrections[key]["original"]:,.0f})</div>', unsafe_allow_html=True)
+                try:
+                    orig_display = f'{float(corrections[key]["original"]):,.0f}'
+                except (ValueError, TypeError):
+                    orig_display = corrections[key]["original"]
+                st.markdown(f'<div class="user-corrected">✏️ Corrected (was: {orig_display})</div>', unsafe_allow_html=True)
 
     # =======================================================================
     # SECTION C: Monthly Claims with Checkboxes, Haircuts, Data Bars
