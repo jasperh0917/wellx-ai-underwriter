@@ -276,7 +276,7 @@ Return as: "complex_cases_notes": "full text of section 19 or empty string if no
    - provider_top10: from "Top 10 Providers" table
    - monthly_claims: from "Claims Spend by Month" chart/table
    - complex_cases_notes: from "Top 5 Claimants" section (member conditions)
-   - census data: use Total Members and any age/gender breakdowns available
+   - census data: extract "total_members" (the Total Members count) and "membership_change_pct" (e.g. -2.4 if "decrease of 2.4%"). Put these as top-level fields. Also fill census_start/census_end if you can derive them.
 7. For monthly claims (Section 17), months with empty/blank values should be set to 0.
 8. Always look for a "Total" row or column and capture it.
 
@@ -681,6 +681,45 @@ def run_sop_analysis(data: dict, commissions: dict, company_name: str, plan: str
 
     census_start = sum_census(data.get("census_start"))
     census_end = sum_census(data.get("census_end"))
+
+    # Census fallback for non-standard reports (MaxHealth etc.)
+    census_assumed = False
+    if census_start == 0 and census_end == 0:
+        total_members = data.get("total_members", 0)
+        change_pct_val = data.get("membership_change_pct", None)
+        if total_members and total_members > 0:
+            if change_pct_val is not None:
+                census_start = int(total_members)
+                census_end = int(round(total_members * (1 + change_pct_val / 100)))
+            else:
+                census_end = int(total_members)
+        # Fallback: assume starting = uploaded census * 0.95
+        uploaded_census = 0
+        census_analysis_data = st.session_state.get("last_census_analysis")
+        if census_analysis_data:
+            uploaded_census = census_analysis_data.get("total_members", 0)
+        if census_start == 0 and census_end == 0 and uploaded_census > 0:
+            census_start = int(round(uploaded_census * 0.95))
+            census_assumed = True
+        if census_start > 0 and census_end == 0 and uploaded_census > 0:
+            start_str = data.get("policy_effective_date") or data.get("report_period_start", "")
+            end_str = data.get("report_period_end", "")
+            expiry_str = data.get("policy_expiry_date", "")
+            rp_start = parse_date_flexible(start_str)
+            rp_end = parse_date_flexible(end_str)
+            pol_expiry = parse_date_flexible(expiry_str)
+            if rp_start and rp_end and pol_expiry and pol_expiry > rp_start:
+                total_days = (pol_expiry - rp_start).days
+                elapsed_days = (rp_end - rp_start).days
+                if total_days > 0:
+                    census_end = int(round(
+                        census_start + (uploaded_census - census_start) * elapsed_days / total_days
+                    ))
+                else:
+                    census_end = uploaded_census
+            else:
+                census_end = uploaded_census
+
     avg_census = (census_start + census_end) / 2 if (census_start + census_end) > 0 else 1
 
     if census_start > 0:
@@ -690,6 +729,7 @@ def run_sop_analysis(data: dict, commissions: dict, company_name: str, plan: str
 
     summary["census_analysis"]["census_start"] = census_start
     summary["census_analysis"]["census_end"] = census_end
+    summary["census_analysis"]["census_assumed"] = census_assumed
     summary["census_analysis"]["avg_census"] = avg_census
     summary["census_analysis"]["census_change_pct"] = round(census_change_pct, 2)
     summary["census_analysis"]["benchmark"] = "±15%"
@@ -2562,13 +2602,66 @@ def page_extracted_info():
     report_start = _sum_census(data.get("census_start"))
     report_end = _sum_census(data.get("census_end"))
 
+    # --- Census fallback for non-standard reports ---
+    census_assumed = False
+    if report_start == 0 and report_end == 0:
+        # Try MaxHealth-style: total_members + membership_change_pct
+        total_members = data.get("total_members", 0)
+        change_pct = data.get("membership_change_pct", None)
+        if total_members and total_members > 0:
+            if change_pct is not None:
+                # total_members is the starting census; apply % change to get ending
+                report_start = int(total_members)
+                report_end = int(round(total_members * (1 + change_pct / 100)))
+            else:
+                # Only total_members, no change info — use as ending census
+                report_end = int(total_members)
+        # If still no census, assume starting = uploaded census * 0.95
+        if report_start == 0 and report_end == 0 and census_count > 0:
+            report_start = int(round(census_count * 0.95))
+            census_assumed = True
+        # If we have starting but no ending, prorate using uploaded census + days elapsed
+        if report_start > 0 and report_end == 0 and census_count > 0:
+            start_str = data.get("policy_effective_date") or data.get("report_period_start", "")
+            end_str = data.get("report_period_end", "")
+            expiry_str = data.get("policy_expiry_date", "")
+            rp_start = parse_date_flexible(start_str)
+            rp_end = parse_date_flexible(end_str)
+            pol_expiry = parse_date_flexible(expiry_str)
+            if rp_start and rp_end and pol_expiry and pol_expiry > rp_start:
+                total_days = (pol_expiry - rp_start).days
+                elapsed_days = (rp_end - rp_start).days
+                if total_days > 0:
+                    report_end = int(round(
+                        report_start + (census_count - report_start) * elapsed_days / total_days
+                    ))
+                else:
+                    report_end = census_count
+            else:
+                report_end = census_count
+        # Persist derived census back to data so calculations pick it up
+        if report_start > 0:
+            data["census_start"] = {"grand_total": report_start}
+        if report_end > 0:
+            data["census_end"] = {"grand_total": report_end}
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        render_metric("Report Starting Census", report_start, currency=False)
+        lbl_start = "Report Starting Census"
+        if census_assumed:
+            lbl_start += " (Assumed)"
+        render_metric(lbl_start, report_start, currency=False)
     with col2:
         render_metric("Report Ending Census", report_end, currency=False)
     with col3:
         render_metric("Uploaded Census", census_count if census_count > 0 else "N/A", currency=False)
+    if census_assumed:
+        st.markdown(
+            '<div class="info-box">⚠️ No census data found in report. '
+            'Starting census assumed as 5% lower than uploaded census. '
+            'Ending census prorated by elapsed policy days.</div>',
+            unsafe_allow_html=True,
+        )
 
     # Uploaded census age distribution
     if census_analysis and census_analysis.get("age_distribution"):
