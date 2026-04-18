@@ -1431,6 +1431,23 @@ def _parse_date(value):
     return None
 
 
+def _company_match_ratio(a: str, b: str) -> float:
+    """Return a 0..1 similarity score between two company name strings.
+
+    Uses difflib.SequenceMatcher after normalising case / whitespace / common
+    corporate suffixes so 'KLAY CAPITAL LIMITED' matches 'Klay Capital Ltd.'
+    """
+    import difflib
+    def _norm(s: str) -> str:
+        s = (s or "").strip().lower()
+        for junk in [" limited", " ltd.", " ltd", " llc", " l.l.c", " l.l.c.",
+                     " inc.", " inc", " co.", " co", " corp.", " corp",
+                     ",", ".", "-"]:
+            s = s.replace(junk, " ")
+        return " ".join(s.split())
+    return difflib.SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
 def generate_quote_excel(
     summary: dict,
     data: dict,
@@ -1438,6 +1455,9 @@ def generate_quote_excel(
     prepared_by: str = "",
     broker_name: str = "",
     rm_name: str = "",
+    underwriter_name: str = "",
+    uw_discount_pct: Optional[float] = None,
+    major_claims_allowance: Optional[float] = None,
 ) -> bytes:
     """
     Build a 3-sheet workbook matching the Claims_Analysis_*.xlsx reference:
@@ -1446,7 +1466,26 @@ def generate_quote_excel(
       3. Summary
     All cross-sheet references and totals are live formulas so underwriters
     can tweak inputs and see recalculated outputs. Returns xlsx bytes.
+
+    Values for uw_discount_pct / major_claims_allowance fall back to the
+    Streamlit session state (form inputs) when not passed explicitly, so
+    either call style works.
     """
+    # Resolve session-backed values if caller didn't supply them
+    if uw_discount_pct is None:
+        uw_discount_pct = float(st.session_state.get("uw_discount_pct", 10.0) or 10.0)
+    if major_claims_allowance is None:
+        major_claims_allowance = float(st.session_state.get("major_claims_allowance", 150000) or 0)
+    if not underwriter_name:
+        underwriter_name = st.session_state.get("last_underwriter", "") or prepared_by
+
+    # Prefer the raw (pre-haircut, pre-exclusion) monthly claims for display
+    raw_monthly = (
+        (st.session_state.get("last_extract") or {}).get("monthly_claims")
+        or data.get("monthly_claims")
+        or []
+    )
+
     wb = Workbook()
 
     # --- shared styles / helpers ---------------------------------------
@@ -1531,10 +1570,15 @@ def generate_quote_excel(
 
     write_label(ws1, "A5", "Company Name  (from Report)")
     write_value(ws1, "B5", employer_extracted)
-    if employer_match:
-        write_note(ws1, "C5", "Company Names matching")
-    elif employer_extracted:
-        write_note(ws1, "C5", "Company Names NOT matching")
+    if employer_extracted:
+        match_ratio = _company_match_ratio(company_name, employer_extracted)
+        match_pct = round(match_ratio * 100)
+        if match_ratio >= 0.80:
+            write_note(ws1, "C5", f"Company Names matching ({match_pct}%)")
+        else:
+            c5 = ws1["C5"]
+            c5.value = f"Company Names NOT matching ({match_pct}%)"
+            c5.font = Font(name="Calibri", bold=True, size=11, color="C43D2D")
 
     write_label(ws1, "A6", "Expiry Date")
     if expiry_dt:
@@ -1574,32 +1618,48 @@ def generate_quote_excel(
     ws1["A16"].font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
 
     # --- CLAIMS BY TYPE (rows 20-26) ---
+    # Dynamic — build from whatever categories the report actually extracted.
+    # Keeps fixed 5-slot layout (rows 21-25) so downstream coords stay stable.
     write_section_header(ws1, "A20", "CLAIMS BY TYPE")
 
     totals = ((data.get("claims_by_member_type") or {}).get("totals")) or {}
-    type_rows = [
-        ("IP", totals.get("ip", 0)),
-        ("OP", totals.get("op", 0)),
-        ("Pharmacy", totals.get("pharmacy", 0)),
-        ("Dental", totals.get("dental", 0)),
-        ("Optical", totals.get("optical", 0)),
-    ]
+    # Preserve standard order if present; append any extra categories afterwards.
+    _std = [("ip", "IP"), ("op", "OP"), ("pharmacy", "Pharmacy"),
+            ("dental", "Dental"), ("optical", "Optical")]
+    type_rows: list = []
+    for key, lbl in _std:
+        if key in totals:
+            type_rows.append((lbl, totals[key]))
+    for k, v in totals.items():
+        if k in ("total",) or any(k == std_key for std_key, _ in _std):
+            continue
+        type_rows.append((k.replace("_", " ").title(), v))
+    # Pad / truncate to 5 slots to keep rows 26+ fixed
+    type_rows = (type_rows + [("", None)] * 5)[:5]
+
     for i, (lbl, val) in enumerate(type_rows):
         r = 21 + i
-        write_label(ws1, f"A{r}", lbl)
-        write_value(ws1, f"B{r}", float(val or 0), number_format=XLS_CURRENCY_FMT)
-        cc = ws1[f"C{r}"]
-        cc.value = f"=B{r}/$B$26"
-        cc.number_format = XLS_PCT_FMT
-        cc.font = Font(name="Calibri", size=11, color="5E788A")
+        if lbl:
+            write_label(ws1, f"A{r}", lbl)
+            write_value(ws1, f"B{r}", float(val or 0), number_format=XLS_CURRENCY_FMT)
+            cc = ws1[f"C{r}"]
+            cc.value = f"=B{r}/$B$26"
+            cc.number_format = XLS_PCT_FMT
+            cc.font = Font(name="Calibri", size=11, color="5E788A")
+        else:
+            # empty slot — leave blank but keep borderless so the grid doesn't look off
+            write_label(ws1, f"A{r}", "")
+            write_value(ws1, f"B{r}", None, number_format=XLS_CURRENCY_FMT)
 
-    # Row 26: sum of claims-by-type
+    # Row 26: sum + dynamic match note (tolerate <5 AED vs claims paid)
     sum_cell = ws1["B26"]
     sum_cell.value = "=SUM(B21:B25)"
     sum_cell.number_format = XLS_CURRENCY_FMT
     sum_cell.font = Font(name="Calibri", bold=True, size=12, color="000000")
     sum_cell.border = thin_border
-    write_note(ws1, "C26", "Matching with claims paid")
+    c26 = ws1["C26"]
+    c26.value = '=IF(ABS(B26-$B$13)<5,"Matching with claims paid","Mismatch — check claim types")'
+    c26.font = Font(name="Calibri", size=11, color="5E788A")
 
     # --- CENSUS INFORMATION (rows 29-34) ---
     write_section_header(ws1, "A29", "CENSUS INFORMATION")
@@ -1638,14 +1698,15 @@ def generate_quote_excel(
     cc.font = Font(name="Calibri", size=11, color="5E788A")
 
     # --- Monthly Claims (rows 42-53) ---
+    # Shows ALL months with their RAW values (pre-haircut, pre-exclusion).
+    # Selection/haircut happen on Sheet 2 — this sheet is purely informational.
     write_section_header(ws1, "A42", "Monthly Claims")
 
-    monthly = data.get("monthly_claims", []) or []
     # Keep up to 10 rows; row 43..52 match the reference's fixed block
     for i in range(10):
         r = 43 + i
-        if i < len(monthly):
-            m = monthly[i]
+        if i < len(raw_monthly):
+            m = raw_monthly[i]
             month_lbl = f"{m.get('month', '')} {m.get('year', '')}".strip()
             write_label(ws1, f"A{r}", month_lbl)
             write_value(
@@ -1662,7 +1723,9 @@ def generate_quote_excel(
     sum53.number_format = XLS_CURRENCY_FMT
     sum53.font = Font(name="Calibri", bold=True, size=12, color="000000")
     sum53.border = thin_border
-    write_note(ws1, "C53", "Matching with claims paid")
+    c53 = ws1["C53"]
+    c53.value = '=IF(ABS(B53-$B$13)<5,"Matching with claims paid","Mismatch — check monthly total")'
+    c53.font = Font(name="Calibri", size=11, color="5E788A")
 
     # --- COMPLEX CASES (row 55+) ---
     write_section_header(ws1, "A55", "COMPLEX CASES")
@@ -1681,9 +1744,14 @@ def generate_quote_excel(
         ws1["A56"].font = Font(name="Calibri", size=12, color="5E788A")
         next_row = 57
 
-    # Prepared-by footer (two rows below last complex-case)
+    # Prepared-by footer: use Underwriter name from the form (fallback to
+    # prepared_by, then em-dash). "— on {date} {time}".
     now = datetime.now()
-    prep_text = f"Prepared by: {prepared_by or '—'} on {now.strftime('%d %b %Y')} at {now.strftime('%I:%M %p').lstrip('0')}"
+    stamp_name = underwriter_name or prepared_by or "—"
+    prep_text = (
+        f"Prepared by: {stamp_name} — on "
+        f"{now.strftime('%d %b %Y')} {now.strftime('%I:%M %p').lstrip('0')}"
+    )
     footer = ws1[f"A{next_row + 1}"]
     footer.value = prep_text
     footer.font = Font(name="Calibri", italic=True, size=11, color="5E788A")
@@ -1706,20 +1774,22 @@ def generate_quote_excel(
         c.alignment = Alignment(horizontal="center", vertical="center")
         c.border = thin_border
 
-    # Monthly rows (2..11)
+    # Monthly rows (2..11) — always use RAW monthly claims (ignore checkbox zeros);
+    # the Selected column (E) still drives D = IF(E, B-C, "") so AVERAGE(D2:D11)
+    # respects the user's selection without hiding the raw values in B.
     monthly_included = st.session_state.get("monthly_included", []) if hasattr(st, "session_state") else []
     for i in range(10):
         r = 2 + i
-        if i < len(monthly):
-            m = monthly[i]
+        if i < len(raw_monthly):
+            m = raw_monthly[i]
             ws2.cell(row=r, column=1, value=f"{m.get('month', '')} {m.get('year', '')}".strip())
             ws2.cell(row=r, column=2, value=float(m.get("value", 0) or 0)).number_format = XLS_CURRENCY_FMT
             ws2.cell(row=r, column=3, value=0).number_format = XLS_CURRENCY_FMT
-            # Determine default selected state: use session flag if available, else first/last excluded
+            # Default selected state: use session flag if available, else first/last excluded
             if monthly_included and i < len(monthly_included):
                 selected = bool(monthly_included[i])
             else:
-                selected = not (i == 0 or i == len(monthly) - 1)
+                selected = not (i == 0 or i == len(raw_monthly) - 1)
             # D is live-linked to E: toggling the Selected checkbox recalculates the average.
             d = ws2.cell(row=r, column=4, value=f'=IF(E{r},B{r}-C{r},"")')
             d.number_format = XLS_CURRENCY_FMT
@@ -1761,8 +1831,11 @@ def generate_quote_excel(
         ("A27", "Yearly Burning Cost per Capita", "B27", "=B25*12", XLS_CURRENCY_FMT, "Expected annual claims per member"),
         ("A28", "Current Census", "B28",
             int((summary.get("premium_quotation") or {}).get("current_census", 0) or 0), None, None),
-        ("A30", "Over reporting Haircut (%)", "B30", 0.10, XLS_PCT_FMT, "i.e. (assumed over reported claims)"),
-        ("A31", "Major Claims Allowance", "B31", 150000, XLS_CURRENCY_FMT, None),
+        ("A30", "Over reporting Haircut (%)", "B30",
+            float(uw_discount_pct or 0) / 100.0, XLS_PCT_FMT,
+            "i.e. (assumed over reported claims)"),
+        ("A31", "Major Claims Allowance", "B31",
+            float(major_claims_allowance or 0), XLS_CURRENCY_FMT, None),
         ("A34", "Yearly Burning Cost", "B34", "=(B27*B28)*(1-B30)+B31", XLS_CURRENCY_FMT, "Expected annual claims"),
     ]
     for a_coord, label, b_coord, value, nf, note in bc_rows:
@@ -1934,11 +2007,7 @@ def generate_quote_excel(
     if flags:
         findings_text = "\n".join(f"• {f}" for f in flags)
     else:
-        findings_text = (
-            "{Prompt: Mention all the flags here. i.e. Ask for recent report if report "
-            "is more than 90 days, ask for monthly census if more than 10%, ask for recent "
-            "medical report and lab results for ongoing major conditions, et al.}"
-        )
+        findings_text = "✓ No flags raised — analysis is clean."
     ws3.merge_cells("A18:C18")
     ff = ws3["A18"]
     ff.value = findings_text
@@ -3546,13 +3615,17 @@ def page_extracted_info():
 
     with col3:
         uw_discount = st.number_input(
-            "UW Discount %",
+            "Over Reporting Haircut",
             value=st.session_state.get("uw_discount_pct", 0.0),
             min_value=0.0, max_value=100.0, step=0.5, format="%.2f", key="ei_uw_discount",
+            help=(
+                "This is to account over reporting of claims of some insurer. "
+                "This is subject to UW discretion and approval of reinsurer."
+            ),
         )
         st.session_state["uw_discount_pct"] = uw_discount
         discount_note = st.text_input(
-            "Discount reason", value=st.session_state.get("uw_discount_note", ""),
+            "Haircut reason", value=st.session_state.get("uw_discount_note", ""),
             placeholder="e.g. Reinsurer approved haircut", key="ei_discount_note",
         )
         st.session_state["uw_discount_note"] = discount_note
