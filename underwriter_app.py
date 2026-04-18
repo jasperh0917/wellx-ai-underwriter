@@ -604,47 +604,26 @@ def consolidate_census_files(files) -> tuple:
             # Try to map common columns
             c = col_lower
 
-            rel_key = None
-            for k in ("relation", "relationship", "member type", "dependency", "relation to principal"):
-                if k in c:
-                    rel_key = k
-                    break
+            def _find_key(candidates):
+                # Exact match first, then prefix match so headers like
+                # "Relationship (Principal, Spouse, Child)" or
+                # "Date of birth (dd/mm/yyyy)" still resolve to the right column.
+                for cand in candidates:
+                    if cand in c:
+                        return cand
+                for cand in candidates:
+                    for actual in c:
+                        if actual.startswith(cand):
+                            return actual
+                return None
 
-            gender_key = None
-            for k in ("gender", "sex"):
-                if k in c:
-                    gender_key = k
-                    break
-
-            dob_key = None
-            for k in ("date of birth", "dob", "birth date", "birthdate", "date_of_birth"):
-                if k in c:
-                    dob_key = k
-                    break
-
-            name_key = None
-            for k in ("beneficiary fullname", "insured name", "member name", "name", "full name", "employee name"):
-                if k in c:
-                    name_key = k
-                    break
-
-            nationality_key = None
-            for k in ("nationality",):
-                if k in c:
-                    nationality_key = k
-                    break
-
-            status_key = None
-            for k in ("status",):
-                if k in c:
-                    status_key = k
-                    break
-
-            eid_key = None
-            for k in ("emirates id", "national identityno", "eid"):
-                if k in c:
-                    eid_key = k
-                    break
+            rel_key = _find_key(("relation", "relationship", "member type", "dependency", "relation to principal"))
+            gender_key = _find_key(("gender", "sex"))
+            dob_key = _find_key(("date of birth", "dob", "birth date", "birthdate", "date_of_birth"))
+            name_key = _find_key(("beneficiary fullname", "insured name", "member name", "name", "full name", "employee name"))
+            nationality_key = _find_key(("nationality",))
+            status_key = _find_key(("status",))
+            eid_key = _find_key(("emirates id", "national identityno", "eid"))
 
             def _g(row, key):
                 if key is None:
