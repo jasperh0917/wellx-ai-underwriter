@@ -19,7 +19,6 @@ Run:
 import streamlit as st
 import anthropic
 import pandas as pd
-import sqlite3
 import json
 import base64
 import io
@@ -27,7 +26,7 @@ import re
 import os
 import math
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Optional
 
@@ -97,95 +96,224 @@ PRINCIPAL_RELATIONS = {"principal", "employee", "self"}
 ALLOWED_RELATIONS = PRINCIPAL_RELATIONS | DEPENDENT_RELATIONS | {"others", "other"}
 
 # ---------------------------------------------------------------------------
-# DATABASE SETUP — SQLite for persisting quotes
+# SUPABASE PERSISTENCE — every analysis is auto-logged to the `analyses` table
 # ---------------------------------------------------------------------------
-DB_PATH = Path(__file__).parent / "quotes.db"
+try:
+    from supabase import create_client, Client as SupabaseClient  # type: ignore
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
 
-def get_db():
-    """Return a connection to the SQLite database, creating tables if needed."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS quotes (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at    TEXT    NOT NULL,
-            company_name  TEXT    NOT NULL,
-            broker_name   TEXT,
-            status        TEXT    DEFAULT 'neutral',
-            summary_json  TEXT,
-            raw_extract   TEXT,
-            commission_broker  REAL,
-            commission_insurer REAL,
-            commission_tpa     REAL,
-            commission_wellx   REAL,
-            commission_margins REAL,
-            burning_cost       REAL,
-            indicative_premium REAL,
-            current_census     INTEGER,
-            notes         TEXT
+@st.cache_resource
+def get_supabase():
+    """Return a cached Supabase client, or None if credentials are missing."""
+    if not (SUPABASE_AVAILABLE and SUPABASE_URL and SUPABASE_KEY):
+        return None
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        return None
+
+
+def _iso_date(value):
+    """Coerce a date-ish value to an ISO YYYY-MM-DD string, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _num(value):
+    """Coerce to float, or None for empty/invalid."""
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_analysis_row(summary: dict, data: dict, census_analysis: Optional[dict],
+                        commissions: dict, context: dict) -> dict:
+    """Flatten the analysis inputs into a single `analyses` row."""
+    ca = summary.get("claims_analysis", {}) or {}
+    ce = summary.get("census_analysis", {}) or {}
+    bc = summary.get("burning_cost_analysis", {}) or {}
+    pq = summary.get("premium_quotation", {}) or {}
+    v  = summary.get("validations", {}) or {}
+    totals = ((data.get("claims_by_member_type") or {}).get("totals")) or {}
+    cena = census_analysis or {}
+
+    return {
+        "company_name": summary.get("company_name") or context.get("company_name") or "",
+        "employer_name_extracted": summary.get("employer_name_extracted"),
+        "employer_match": v.get("employer_match"),
+        "broker_name":         context.get("broker_name"),
+        "relationship_manager": context.get("rm_name"),
+        "underwriter":         context.get("underwriter"),
+        "prepared_by":         context.get("prepared_by"),
+        "plan":                pq.get("plan") or context.get("plan"),
+        "status":              context.get("status", "neutral"),
+
+        "policy_effective_date": _iso_date(v.get("policy_effective_date")),
+        "policy_expiry_date":    _iso_date(v.get("policy_expiry_date")),
+        "report_period_start":   _iso_date(data.get("report_period_start")),
+        "report_period_end":     _iso_date(data.get("report_period_end")),
+        "report_days_old":       v.get("report_days_old"),
+        "policy_days_since":     v.get("policy_days_since"),
+
+        "claims_paid":           _num(ca.get("claims_paid")),
+        "claims_outstanding":    _num(ca.get("claims_outstanding")),
+        "claims_ibnr":           _num(ca.get("claims_ibnr")),
+        "total_incurred":        _num(ca.get("total_incurred")),
+        "outstanding_ratio_pct": _num(ca.get("outstanding_ratio_pct")),
+        "ip_ratio_pct":          _num(ca.get("ip_ratio_pct")),
+        "claims_ip":        _num(totals.get("ip")),
+        "claims_op":        _num(totals.get("op")),
+        "claims_pharmacy":  _num(totals.get("pharmacy")),
+        "claims_dental":    _num(totals.get("dental")),
+        "claims_optical":   _num(totals.get("optical")),
+
+        "census_start":          ce.get("census_start"),
+        "census_end":            ce.get("census_end"),
+        "avg_census":            _num(ce.get("avg_census")),
+        "census_change_pct":     _num(ce.get("census_change_pct")),
+        "uploaded_census_count": context.get("uploaded_census_count"),
+
+        "census_employees":                 cena.get("employees"),
+        "census_dependents":                cena.get("dependents"),
+        "census_employee_pct":              _num(cena.get("employee_pct")),
+        "census_dependent_pct":             _num(cena.get("dependent_pct")),
+        "census_married_females_18_45":     cena.get("married_females_18_45"),
+        "census_married_females_18_45_pct": _num(cena.get("married_females_18_45_pct")),
+        "census_aged_50_plus":              cena.get("aged_50_plus"),
+        "census_aged_50_plus_pct":          _num(cena.get("aged_50_plus_pct")),
+        "age_distribution":                 cena.get("age_distribution") or None,
+
+        "highest_avg_monthly":              _num(bc.get("highest_avg_monthly")),
+        "burning_cost_per_capita":          _num(bc.get("burning_cost_per_capita")),
+        "adjusted_burning_cost_per_capita": _num(bc.get("adjusted_burning_cost_per_capita")),
+        "inflation_pct":                    _num(bc.get("inflation_pct")),
+        "ip_adjustment_pct":                _num(bc.get("ip_adjustment_pct")),
+        "outstanding_adjustment_pct":       _num(bc.get("outstanding_adjustment_pct")),
+        "major_claims_allowance":           _num(context.get("major_claims_allowance")),
+        "uw_loading_pct":                   _num(context.get("uw_loading_pct")),
+        "uw_discount_pct":                  _num(context.get("uw_discount_pct")),
+
+        "projected_claims_annual":    _num(pq.get("projected_claims_annual")),
+        "net_premium":                _num(pq.get("net_premium")),
+        "total_commission_pct":       _num(pq.get("total_commission_pct")),
+        "indicative_premium":         _num(pq.get("indicative_premium")),
+        "premium_per_member_annual":  _num(pq.get("premium_per_member_annual")),
+        "premium_per_member_monthly": _num(pq.get("premium_per_member_monthly")),
+
+        "commission_broker":        _num(commissions.get("Broker")),
+        "commission_platform":      _num(commissions.get("HealthX") or commissions.get("OpenX")),
+        "commission_insurer":       _num(commissions.get("QIC") or commissions.get("DNI")),
+        "commission_nas":           _num(commissions.get("NAS")),
+        "commission_ri_margin":     _num(commissions.get("Reinsurance Margin")),
+        "commission_insurance_tax": _num(commissions.get("Insurance Tax")),
+        "commission_ri_broker":     _num(commissions.get("RI Broker")),
+
+        "summary":        summary,
+        "raw_extract":    data,
+        "flags":          summary.get("flags") or [],
+        "monthly_claims": data.get("monthly_claims") or [],
+        "top_diagnoses":  data.get("diagnosis_top10_values") or [],
+        "top_providers":  data.get("provider_top10_values") or [],
+        "complex_cases":  (summary.get("diagnosis_analysis") or {}).get("flagged_conditions") or [],
+    }
+
+
+def log_analysis(summary: dict, data: dict, census_analysis: Optional[dict],
+                 commissions: dict, context: dict) -> Optional[str]:
+    """Insert one analysis row into Supabase. Returns the new row's UUID or None."""
+    sb = get_supabase()
+    if sb is None:
+        return None
+    try:
+        row = _build_analysis_row(summary, data, census_analysis, commissions, context)
+        res = sb.table("analyses").insert(row).execute()
+        if res.data:
+            return res.data[0].get("id")
+    except Exception as e:
+        st.warning(f"Supabase log failed: {e}")
+    return None
+
+
+def update_analysis(analysis_id: str, patch: dict) -> bool:
+    """Update fields on an existing analysis row. Returns True on success."""
+    sb = get_supabase()
+    if sb is None or not analysis_id:
+        return False
+    try:
+        sb.table("analyses").update(patch).eq("id", analysis_id).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Supabase update failed: {e}")
+        return False
+
+
+def list_analyses(limit: int = 500) -> list:
+    """Return all analyses newest-first, as a list of dicts."""
+    sb = get_supabase()
+    if sb is None:
+        return []
+    try:
+        res = (
+            sb.table("analyses")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
         )
-    """)
-    conn.commit()
-    return conn
+        return res.data or []
+    except Exception as e:
+        st.warning(f"Supabase fetch failed: {e}")
+        return []
 
 
-def save_quote(data: dict):
-    """Insert a new quote record and return its ID."""
-    conn = get_db()
-    cur = conn.execute("""
-        INSERT INTO quotes (
-            created_at, company_name, broker_name, status,
-            summary_json, raw_extract,
-            commission_broker, commission_insurer, commission_tpa,
-            commission_wellx, commission_margins,
-            burning_cost, indicative_premium, current_census, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        datetime.now().isoformat(),
-        data.get("company_name", ""),
-        data.get("broker_name", ""),
-        data.get("status", "neutral"),
-        json.dumps(data.get("summary", {})),
-        json.dumps(data.get("raw_extract", {})),
-        data.get("commission_broker", 10),
-        data.get("commission_insurer", 0.5),
-        data.get("commission_tpa", 4),
-        data.get("commission_wellx", 4),
-        data.get("commission_margins", 7),
-        data.get("burning_cost", 0),
-        data.get("indicative_premium", 0),
-        data.get("current_census", 0),
-        data.get("notes", ""),
-    ))
-    conn.commit()
-    quote_id = cur.lastrowid
-    conn.close()
-    return quote_id
+def get_analysis(analysis_id: str) -> Optional[dict]:
+    """Fetch a single analysis row by id."""
+    sb = get_supabase()
+    if sb is None or not analysis_id:
+        return None
+    try:
+        res = sb.table("analyses").select("*").eq("id", analysis_id).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception as e:
+        st.warning(f"Supabase fetch failed: {e}")
+    return None
 
 
-def update_quote_status(quote_id: int, status: str):
-    """Update the status of an existing quote."""
-    conn = get_db()
-    conn.execute("UPDATE quotes SET status = ? WHERE id = ?", (status, quote_id))
-    conn.commit()
-    conn.close()
-
-
-def get_all_quotes():
-    """Return all quotes as a list of dicts."""
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM quotes ORDER BY created_at DESC").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_quote_by_id(quote_id: int):
-    """Return a single quote by ID."""
-    conn = get_db()
-    row = conn.execute("SELECT * FROM quotes WHERE id = ?", (quote_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+def delete_analysis(analysis_id: str) -> bool:
+    """Delete an analysis row by id."""
+    sb = get_supabase()
+    if sb is None or not analysis_id:
+        return False
+    try:
+        sb.table("analyses").delete().eq("id", analysis_id).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Supabase delete failed: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -2767,8 +2895,9 @@ def page_new_quote():
                 use_container_width=True,
             )
 
-        # Save to database
+        # Auto-logged to Supabase — this block just updates the status on the logged row
         with col2:
+            current_id = st.session_state.get("current_analysis_id")
             status = st.selectbox(
                 "Quote Status",
                 ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"],
@@ -2776,30 +2905,36 @@ def page_new_quote():
             )
 
         with col3:
-            if st.button("💾 Save Quote to Database", use_container_width=True):
-                # Map dynamic commission keys to DB columns
-                comm_broker = comms.get("Broker", comms.get("broker", 10))
-                comm_insurer = comms.get("Insurance Tax", comms.get("insurer", 0.5))
-                comm_tpa = comms.get("NAS", comms.get("tpa", 4))
-                comm_wellx = comms.get("HealthX", comms.get("OpenX", comms.get("wellx", 4)))
-                comm_margins = comms.get("Reinsurance Margin", comms.get("margins", 7))
-                quote_data = {
-                    "company_name": st.session_state.get("last_company", ""),
-                    "broker_name": st.session_state.get("last_broker", ""),
-                    "status": status,
-                    "summary": summary,
-                    "raw_extract": data,
-                    "commission_broker": comm_broker,
-                    "commission_insurer": comm_insurer,
-                    "commission_tpa": comm_tpa,
-                    "commission_wellx": comm_wellx,
-                    "commission_margins": comm_margins,
-                    "burning_cost": summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"],
-                    "indicative_premium": summary["premium_quotation"]["indicative_premium"],
-                    "current_census": summary["premium_quotation"]["current_census"],
-                }
-                quote_id = save_quote(quote_data)
-                st.success(f"Quote saved! (ID: {quote_id})")
+            current_id = st.session_state.get("current_analysis_id")
+            label = "💾 Update Status" if current_id else "💾 Log Analysis"
+            if st.button(label, use_container_width=True):
+                if current_id:
+                    if update_analysis(current_id, {"status": status}):
+                        st.success(f"Status set to '{status}' (id: {current_id[:8]}…)")
+                else:
+                    # Fallback path: analysis wasn't auto-logged yet (e.g. Supabase
+                    # creds missing at time of run). Try logging now.
+                    new_id = log_analysis(
+                        summary,
+                        data,
+                        st.session_state.get("last_census_analysis"),
+                        comms,
+                        context={
+                            "company_name":           st.session_state.get("last_company", ""),
+                            "broker_name":            st.session_state.get("last_broker", ""),
+                            "rm_name":                st.session_state.get("last_rm", ""),
+                            "underwriter":            st.session_state.get("last_underwriter", ""),
+                            "prepared_by":            st.session_state.get("prepared_by", ""),
+                            "plan":                   st.session_state.get("last_plan", ""),
+                            "uploaded_census_count":  st.session_state.get("last_census_count", 0),
+                            "status":                 status,
+                        },
+                    )
+                    if new_id:
+                        st.session_state["current_analysis_id"] = new_id
+                        st.success(f"Saved to Supabase (id: {new_id[:8]}…)")
+                    else:
+                        st.error("Supabase is not configured — set SUPABASE_URL and SUPABASE_KEY in secrets.")
 
         # View raw extraction
         with st.expander("🔍 View Raw Extracted Data (JSON)"):
@@ -3457,6 +3592,29 @@ def page_extracted_info():
         st.session_state["last_summary"] = summary
         st.session_state["active_page"] = "📋 Extracted Information"
 
+        # Auto-log to Supabase (second-brain history)
+        analysis_id = log_analysis(
+            summary,
+            analysis_data,
+            st.session_state.get("last_census_analysis"),
+            commissions,
+            context={
+                "company_name":          company,
+                "broker_name":           st.session_state.get("last_broker", ""),
+                "rm_name":               st.session_state.get("last_rm", ""),
+                "underwriter":           st.session_state.get("last_underwriter", ""),
+                "prepared_by":           st.session_state.get("prepared_by", ""),
+                "plan":                  plan,
+                "uploaded_census_count": uploaded_count,
+                "major_claims_allowance": st.session_state.get("major_claims_allowance", 0),
+                "uw_loading_pct":        st.session_state.get("uw_loading_pct", 0),
+                "uw_discount_pct":       st.session_state.get("uw_discount_pct", 0),
+                "status":                "neutral",
+            },
+        )
+        if analysis_id:
+            st.session_state["current_analysis_id"] = analysis_id
+
         # Display census analysis if available
         if census_analysis:
             display_census_analysis(census_analysis)
@@ -3494,29 +3652,34 @@ def page_extracted_info():
             )
 
         with col3:
-            if st.button("💾 Save Quote", use_container_width=True, key="ei_save"):
-                comm_broker = commissions.get("Broker", 10)
-                comm_insurer = commissions.get("Insurance Tax", 0.5)
-                comm_tpa = commissions.get("NAS", 4)
-                comm_wellx = commissions.get("HealthX", commissions.get("OpenX", 4))
-                comm_margins = commissions.get("Reinsurance Margin", 7)
-                quote_data = {
-                    "company_name": company,
-                    "broker_name": st.session_state.get("last_broker", ""),
-                    "status": status,
-                    "summary": summary,
-                    "raw_extract": analysis_data,
-                    "commission_broker": comm_broker,
-                    "commission_insurer": comm_insurer,
-                    "commission_tpa": comm_tpa,
-                    "commission_wellx": comm_wellx,
-                    "commission_margins": comm_margins,
-                    "burning_cost": summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"],
-                    "indicative_premium": summary["premium_quotation"]["indicative_premium"],
-                    "current_census": summary["premium_quotation"]["current_census"],
-                }
-                quote_id = save_quote(quote_data)
-                st.success(f"Quote saved! (ID: {quote_id})")
+            current_id = st.session_state.get("current_analysis_id")
+            label = "💾 Update Status" if current_id else "💾 Log Analysis"
+            if st.button(label, use_container_width=True, key="ei_save"):
+                if current_id:
+                    if update_analysis(current_id, {"status": status}):
+                        st.success(f"Status set to '{status}' (id: {current_id[:8]}…)")
+                else:
+                    new_id = log_analysis(
+                        summary,
+                        analysis_data,
+                        census_analysis,
+                        commissions,
+                        context={
+                            "company_name":           company,
+                            "broker_name":            st.session_state.get("last_broker", ""),
+                            "rm_name":                st.session_state.get("last_rm", ""),
+                            "underwriter":            st.session_state.get("last_underwriter", ""),
+                            "prepared_by":            st.session_state.get("prepared_by", ""),
+                            "plan":                   plan,
+                            "uploaded_census_count":  uploaded_count,
+                            "status":                 status,
+                        },
+                    )
+                    if new_id:
+                        st.session_state["current_analysis_id"] = new_id
+                        st.success(f"Saved to Supabase (id: {new_id[:8]}…)")
+                    else:
+                        st.error("Supabase is not configured — set SUPABASE_URL and SUPABASE_KEY in secrets.")
 
 
 # ---------------------------------------------------------------------------
@@ -3546,43 +3709,43 @@ def page_revisions():
     </div>
     """, unsafe_allow_html=True)
 
-    quotes = get_all_quotes()
+    quotes = list_analyses()
     if not quotes:
-        st.info("No saved quotes yet. Create a new quote first.")
+        st.info("No analyses logged yet. Run a new analysis first (requires Supabase credentials).")
         return
 
-    # Quote selector
+    # Quote selector — use uuid as the id key
     quote_options = {
-        f"#{q['id']} — {q['company_name']} ({q['created_at'][:10]})": q["id"]
+        f"{q['company_name']} — {q['created_at'][:10]} ({q['id'][:8]}…)": q["id"]
         for q in quotes
     }
-    selected_label = st.selectbox("Select a previous quote to revise", list(quote_options.keys()))
+    selected_label = st.selectbox("Select a previous analysis to revise", list(quote_options.keys()))
     selected_id = quote_options[selected_label]
 
-    quote = get_quote_by_id(selected_id)
+    quote = get_analysis(selected_id)
     if not quote:
-        st.error("Quote not found.")
+        st.error("Analysis not found.")
         return
 
-    # Load stored data
-    try:
-        stored_summary = json.loads(quote["summary_json"]) if quote["summary_json"] else {}
-        stored_extract = json.loads(quote["raw_extract"]) if quote["raw_extract"] else {}
-    except json.JSONDecodeError:
-        stored_summary = {}
-        stored_extract = {}
+    stored_summary = quote.get("summary") or {}
+    stored_extract = quote.get("raw_extract") or {}
 
-    st.markdown(f"**Company:** {quote['company_name']}  |  **Broker:** {quote['broker_name']}  |  **Status:** {quote['status']}")
+    st.markdown(
+        f"**Company:** {quote['company_name']}  |  "
+        f"**Broker:** {quote.get('broker_name') or 'N/A'}  |  "
+        f"**Status:** {quote.get('status') or 'neutral'}"
+    )
     st.markdown("---")
 
     # Revision inputs
     st.markdown('<div class="section-lbl">Adjust Parameters</div>', unsafe_allow_html=True)
 
+    pq_default = (stored_summary.get("premium_quotation") or {}).get("current_census", 0)
     col1, col2 = st.columns(2)
     with col1:
         new_census = st.number_input(
             "Updated Current Census",
-            value=int(quote.get("current_census", 0) or 0),
+            value=int(quote.get("uploaded_census_count") or pq_default or 1),
             min_value=1,
             step=1,
         )
@@ -3599,18 +3762,18 @@ def page_revisions():
     st.markdown('<div class="section-lbl">Commissions</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        rev_broker = st.number_input("Broker ", value=float(quote.get("commission_broker", 10)), step=0.5, key="rev_b")
+        rev_broker = st.number_input("Broker ", value=float(quote.get("commission_broker") or 10), step=0.5, key="rev_b")
     with c2:
-        rev_insurer = st.number_input("Insurer ", value=float(quote.get("commission_insurer", 0.5)), step=0.1, key="rev_i")
+        rev_insurer = st.number_input("Insurer ", value=float(quote.get("commission_insurer") or 0.5), step=0.1, key="rev_i")
     with c3:
-        rev_tpa = st.number_input("TPA ", value=float(quote.get("commission_tpa", 4)), step=0.5, key="rev_t")
+        rev_nas = st.number_input("NAS ", value=float(quote.get("commission_nas") or 4), step=0.5, key="rev_t")
     with c4:
-        rev_wellx = st.number_input("WellX ", value=float(quote.get("commission_wellx", 4)), step=0.5, key="rev_w")
+        rev_platform = st.number_input("Platform ", value=float(quote.get("commission_platform") or 4), step=0.5, key="rev_w")
     with c5:
-        rev_margins = st.number_input("Margins ", value=float(quote.get("commission_margins", 7)), step=0.5, key="rev_m")
+        rev_margins = st.number_input("RI Margin ", value=float(quote.get("commission_ri_margin") or 7), step=0.5, key="rev_m")
 
     if st.button("📊 Recalculate Premium", type="primary", use_container_width=True):
-        burning_cost = float(quote.get("burning_cost", 0) or 0)
+        burning_cost = float(quote.get("adjusted_burning_cost_per_capita") or 0)
 
         # Recalculate
         projected_claims = burning_cost * 12 * new_census
@@ -3618,7 +3781,7 @@ def page_revisions():
         # Apply manual adjustment
         net_premium = projected_claims * (1 + manual_adjustment_pct / 100)
 
-        total_comm = (rev_broker + rev_insurer + rev_tpa + rev_wellx + rev_margins) / 100
+        total_comm = (rev_broker + rev_insurer + rev_nas + rev_platform + rev_margins) / 100
 
         if total_comm < 1:
             new_premium = net_premium / (1 - total_comm)
@@ -3681,10 +3844,10 @@ def page_dashboard():
     </div>
     """, unsafe_allow_html=True)
 
-    quotes = get_all_quotes()
+    quotes = list_analyses()
 
     if not quotes:
-        st.info("No quotes saved yet. Go to 'New Quote' to create one.")
+        st.info("No analyses logged yet. Go to 'New Quote' to create one (requires Supabase credentials).")
         return
 
     # Status filter
@@ -3694,7 +3857,7 @@ def page_dashboard():
     if status_filter != "All":
         quotes = [q for q in quotes if q.get("status") == status_filter]
 
-    st.markdown(f"**Showing {len(quotes)} quote(s)**")
+    st.markdown(f"**Showing {len(quotes)} analysis(es)**")
     st.markdown("---")
 
     # Status color badges
@@ -3706,51 +3869,60 @@ def page_dashboard():
         "confirmed": "✅",
         "lost": "⚫",
     }
+    status_options = ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"]
 
     for q in quotes:
-        badge = status_colors.get(q["status"], "⚪")
-        premium = float(q.get("indicative_premium", 0) or 0)
-        census = int(q.get("current_census", 0) or 0)
+        qid = q["id"]
+        short_id = qid[:8]
+        badge = status_colors.get(q.get("status"), "⚪")
+        premium = float(q.get("indicative_premium") or 0)
+        stored_summary = q.get("summary") or {}
+        pq_census = (stored_summary.get("premium_quotation") or {}).get("current_census", 0)
+        census = int(q.get("uploaded_census_count") or pq_census or 0)
 
         with st.expander(
-            f"{badge} #{q['id']} — **{q['company_name']}** | "
+            f"{badge} {short_id}… — **{q['company_name']}** | "
             f"Premium: AED {premium:,.0f} | Census: {census} | "
             f"{q['created_at'][:10]}"
         ):
             col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
-                st.markdown(f"**Broker:** {q.get('broker_name', 'N/A')}")
+                st.markdown(f"**Broker:** {q.get('broker_name') or 'N/A'}")
+                st.markdown(f"**RM:** {q.get('relationship_manager') or 'N/A'}")
+                st.markdown(f"**Plan:** {q.get('plan') or 'N/A'}")
                 st.markdown(f"**Created:** {q['created_at'][:19]}")
-                st.markdown(f"**Burning Cost Per Capita:** AED {float(q.get('burning_cost', 0) or 0):,.2f}")
+                bcpc = float(q.get("adjusted_burning_cost_per_capita") or 0)
+                st.markdown(f"**Adj. Burning Cost Per Capita:** AED {bcpc:,.2f}")
 
-                # Commission breakdown
-                comms = f"Broker: {q.get('commission_broker', 0)}% | Insurer: {q.get('commission_insurer', 0)}% | TPA: {q.get('commission_tpa', 0)}% | WellX: {q.get('commission_wellx', 0)}% | Margins: {q.get('commission_margins', 0)}%"
+                comms = (
+                    f"Broker: {q.get('commission_broker') or 0}% | "
+                    f"Insurer: {q.get('commission_insurer') or 0}% | "
+                    f"NAS: {q.get('commission_nas') or 0}% | "
+                    f"Platform: {q.get('commission_platform') or 0}% | "
+                    f"RI Margin: {q.get('commission_ri_margin') or 0}%"
+                )
                 st.markdown(f"**Commissions:** {comms}")
 
             with col2:
+                current_status = q.get("status") or "neutral"
+                idx = status_options.index(current_status) if current_status in status_options else 0
                 new_status = st.selectbox(
                     "Update Status",
-                    ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"],
-                    index=["neutral", "positive", "not good", "will confirm", "confirmed", "lost"].index(q["status"]),
-                    key=f"status_{q['id']}",
+                    status_options,
+                    index=idx,
+                    key=f"status_{qid}",
                 )
 
             with col3:
-                if st.button("Update", key=f"update_{q['id']}", use_container_width=True):
-                    update_quote_status(q["id"], new_status)
-                    st.success(f"Status updated to '{new_status}'")
-                    st.rerun()
+                if st.button("Update", key=f"update_{qid}", use_container_width=True):
+                    if update_analysis(qid, {"status": new_status}):
+                        st.success(f"Status updated to '{new_status}'")
+                        st.rerun()
 
-            # Show stored summary if available
-            if q.get("summary_json"):
-                try:
-                    stored = json.loads(q["summary_json"])
-                    if stored.get("flags"):
-                        st.markdown("**Flags:**")
-                        for flag in stored["flags"]:
-                            st.markdown(f'<div class="badge-warn">⚠ {flag}</div>', unsafe_allow_html=True)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            if stored_summary.get("flags"):
+                st.markdown("**Flags:**")
+                for flag in stored_summary["flags"]:
+                    st.markdown(f'<div class="badge-warn">⚠ {flag}</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
