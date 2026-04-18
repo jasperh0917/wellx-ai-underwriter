@@ -94,7 +94,7 @@ DEPENDENT_RELATIONS = {"spouse", "wife", "husband", "son", "daughter", "child"}
 # Relation types that count as principals/employees
 PRINCIPAL_RELATIONS = {"principal", "employee", "self"}
 # Allowed relation types (principals + dependents)
-ALLOWED_RELATIONS = PRINCIPAL_RELATIONS | DEPENDENT_RELATIONS
+ALLOWED_RELATIONS = PRINCIPAL_RELATIONS | DEPENDENT_RELATIONS | {"others", "other"}
 
 # ---------------------------------------------------------------------------
 # DATABASE SETUP — SQLite for persisting quotes
@@ -422,6 +422,322 @@ def parse_date_flexible(date_str: str) -> Optional[datetime]:
         except ValueError:
             continue
     return None
+
+
+def consolidate_census_files(files) -> tuple:
+    """
+    Accept a list of uploaded Streamlit file objects (Excel/CSV), detect their
+    format (Liva/Nextcare 93-col vs MaxHealth/Chrome 41-col vs standard census),
+    normalize to a common schema, filter to active members, and return a single
+    consolidated DataFrame plus a summary dict.
+
+    Returns (consolidated_df, summary_dict).
+    summary_dict keys: per_file (list of {name, format, total, active, inactive}),
+                       total_active, total_inactive
+    """
+    # ── Column mappings for each known format ──
+    LIVA_HEADER_MARKER = "Beneficiary FullName"      # 93-col Nextcare/Liva
+    MAX_HEADER_MARKER  = "INSURED NAME"              # 41-col MaxHealth/Chrome
+
+    STANDARD_COLS = [
+        "Source File", "Category", "Beneficiary Name",
+        "DOB", "Age", "Gender", "Nationality",
+        "Relation", "Marital Status", "Emirates ID", "Passport No",
+        "Card Number", "Policy No", "Annual Limit", "Emirate", "Status",
+    ]
+
+    all_rows = []
+    summary_per_file = []
+
+    for f in files:
+        fname = f.name
+        ext = fname.split(".")[-1].lower()
+
+        # Read into a raw DataFrame, auto-detecting the header row.
+        # Liva/Nextcare files often have a title row + blank row before the
+        # real header, so if the default read doesn't surface known columns
+        # we scan the first 10 rows for the actual header.
+        KNOWN_HEADERS = {
+            "beneficiary fullname", "insured name", "member name",
+            "payer", "master_contract", "relation", "gender",
+        }
+        try:
+            f.seek(0)
+            if ext == "csv":
+                raw_df = pd.read_csv(f)
+            else:
+                raw_df = pd.read_excel(f)
+
+            # Check if known headers are in columns
+            cur_cols = {str(c).strip().lower() for c in raw_df.columns}
+            if not (cur_cols & KNOWN_HEADERS):
+                # Scan first rows for the real header
+                for scan_row in range(min(10, len(raw_df))):
+                    row_vals = {str(v).strip().lower() for v in raw_df.iloc[scan_row] if pd.notna(v)}
+                    if row_vals & KNOWN_HEADERS:
+                        # Re-read with this row as header
+                        f.seek(0)
+                        if ext == "csv":
+                            raw_df = pd.read_csv(f, header=scan_row + 1)
+                        else:
+                            raw_df = pd.read_excel(f, header=scan_row + 1)
+                        break
+        except Exception as exc:
+            summary_per_file.append({"name": fname, "format": "ERROR", "total": 0,
+                                     "active": 0, "inactive": 0, "error": str(exc)})
+            continue
+
+        # Drop fully blank rows
+        raw_df = raw_df.dropna(how="all").reset_index(drop=True)
+        col_lower = {c.strip().lower(): c for c in raw_df.columns}
+        col_set = set(col_lower.keys())
+
+        detected_format = "standard"
+        file_rows = []
+
+        # ── Detect Liva / Nextcare format ─────────────────────────────────
+        if "beneficiary fullname" in col_set or ("card number" in col_set and "category" in col_set and raw_df.shape[1] > 60):
+            detected_format = "Liva/Nextcare"
+            c = col_lower  # shorthand
+
+            def _g(row, key):
+                col = c.get(key)
+                if col is None:
+                    return ""
+                v = row.get(col)
+                return str(v).strip() if pd.notna(v) else ""
+
+            for _, row in raw_df.iterrows():
+                status = _g(row, "status")
+                is_active = status.lower() == "active" if status else True
+
+                # Parse DOB
+                dob = ""
+                age = _g(row, "age")
+                dob_col = c.get("dob")
+                if dob_col and pd.notna(row.get(dob_col)):
+                    try:
+                        dob = str(row[dob_col])[:10]
+                    except Exception:
+                        pass
+
+                file_rows.append({
+                    "Source File": fname,
+                    "Category": _g(row, "category"),
+                    "Beneficiary Name": _g(row, "beneficiary fullname"),
+                    "DOB": dob,
+                    "Age": age,
+                    "Gender": _g(row, "gender"),
+                    "Nationality": _g(row, "nationality"),
+                    "Relation": _g(row, "dependency"),
+                    "Marital Status": _g(row, "marital status"),
+                    "Emirates ID": _g(row, "national identityno"),
+                    "Passport No": _g(row, "passportno"),
+                    "Card Number": _g(row, "card number"),
+                    "Policy No": _g(row, "policy.no"),
+                    "Annual Limit": _g(row, "annual limit"),
+                    "Emirate": _g(row, "emirate-visaissued") or _g(row, "person work.emirate"),
+                    "Status": status,
+                    "_active": is_active,
+                })
+
+        # ── Detect MaxHealth / Chrome format ──────────────────────────────
+        elif "insured name" in col_set or ("member name" in col_set and "plcy_ref" in col_set):
+            detected_format = "MaxHealth/Chrome"
+            c = col_lower
+
+            def _g(row, key):
+                col = c.get(key)
+                if col is None:
+                    return ""
+                v = row.get(col)
+                return str(v).strip() if pd.notna(v) else ""
+
+            for _, row in raw_df.iterrows():
+                status = _g(row, "status")
+                is_active = status.lower() == "active" if status else True
+
+                dob = ""
+                dob_col = c.get("date of birth")
+                if dob_col and pd.notna(row.get(dob_col)):
+                    try:
+                        dob = str(row[dob_col])[:10]
+                    except Exception:
+                        pass
+
+                age = ""
+                if dob:
+                    try:
+                        bd = datetime.strptime(dob, "%Y-%m-%d")
+                        today = datetime.today()
+                        age = str(today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day)))
+                    except Exception:
+                        pass
+
+                # Normalize relation
+                relation = _g(row, "relation to principal")
+                emirate = _g(row, "visa_issued")
+
+                file_rows.append({
+                    "Source File": fname,
+                    "Category": _g(row, "category"),
+                    "Beneficiary Name": _g(row, "insured name") or _g(row, "member name"),
+                    "DOB": dob,
+                    "Age": age,
+                    "Gender": _g(row, "gender"),
+                    "Nationality": _g(row, "nationality"),
+                    "Relation": relation,
+                    "Marital Status": _g(row, "marital status"),
+                    "Emirates ID": _g(row, "emirates id"),
+                    "Passport No": _g(row, "passport_no"),
+                    "Card Number": _g(row, "member id"),
+                    "Policy No": _g(row, "plcy_ref"),
+                    "Annual Limit": _g(row, "sum assured"),
+                    "Emirate": emirate,
+                    "Status": status,
+                    "_active": is_active,
+                })
+
+        # ── Standard / simple census format ───────────────────────────────
+        else:
+            detected_format = "Standard"
+            # Try to map common columns
+            c = col_lower
+
+            rel_key = None
+            for k in ("relation", "relationship", "member type", "dependency", "relation to principal"):
+                if k in c:
+                    rel_key = k
+                    break
+
+            gender_key = None
+            for k in ("gender", "sex"):
+                if k in c:
+                    gender_key = k
+                    break
+
+            dob_key = None
+            for k in ("date of birth", "dob", "birth date", "birthdate", "date_of_birth"):
+                if k in c:
+                    dob_key = k
+                    break
+
+            name_key = None
+            for k in ("beneficiary fullname", "insured name", "member name", "name", "full name", "employee name"):
+                if k in c:
+                    name_key = k
+                    break
+
+            nationality_key = None
+            for k in ("nationality",):
+                if k in c:
+                    nationality_key = k
+                    break
+
+            status_key = None
+            for k in ("status",):
+                if k in c:
+                    status_key = k
+                    break
+
+            eid_key = None
+            for k in ("emirates id", "national identityno", "eid"):
+                if k in c:
+                    eid_key = k
+                    break
+
+            def _g(row, key):
+                if key is None:
+                    return ""
+                col = c.get(key)
+                if col is None:
+                    return ""
+                v = row.get(col)
+                return str(v).strip() if pd.notna(v) else ""
+
+            for _, row in raw_df.iterrows():
+                status = _g(row, status_key) if status_key else ""
+                is_active = status.lower() == "active" if status else True  # no status col → assume active
+
+                dob = ""
+                if dob_key:
+                    dob_col_name = c.get(dob_key)
+                    if dob_col_name and pd.notna(row.get(dob_col_name)):
+                        try:
+                            dob = str(row[dob_col_name])[:10]
+                        except Exception:
+                            pass
+
+                age = ""
+                if dob:
+                    try:
+                        bd = datetime.strptime(dob, "%Y-%m-%d")
+                        today = datetime.today()
+                        age = str(today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day)))
+                    except Exception:
+                        pass
+
+                file_rows.append({
+                    "Source File": fname,
+                    "Category": "",
+                    "Beneficiary Name": _g(row, name_key) if name_key else "",
+                    "DOB": dob,
+                    "Age": age,
+                    "Gender": _g(row, gender_key) if gender_key else "",
+                    "Nationality": _g(row, nationality_key) if nationality_key else "",
+                    "Relation": _g(row, rel_key) if rel_key else "",
+                    "Marital Status": "",
+                    "Emirates ID": _g(row, eid_key) if eid_key else "",
+                    "Passport No": "",
+                    "Card Number": "",
+                    "Policy No": "",
+                    "Annual Limit": "",
+                    "Emirate": "",
+                    "Status": status,
+                    "_active": is_active,
+                })
+
+        # ── Tally active/inactive for this file ──
+        active_rows = [r for r in file_rows if r["_active"]]
+        inactive_count = len(file_rows) - len(active_rows)
+        summary_per_file.append({
+            "name": fname,
+            "format": detected_format,
+            "total": len(file_rows),
+            "active": len(active_rows),
+            "inactive": inactive_count,
+        })
+        all_rows.extend(active_rows)
+
+    # ── Build consolidated DataFrame ──
+    if not all_rows:
+        return pd.DataFrame(columns=STANDARD_COLS), {
+            "per_file": summary_per_file, "total_active": 0, "total_inactive": 0
+        }
+
+    consolidated_df = pd.DataFrame(all_rows)[STANDARD_COLS]
+
+    # ── Normalize Relation column for downstream analyze_census_file ──
+    relation_map = {
+        "principal": "Principal", "employee": "Principal", "self": "Principal",
+        "spouse": "Spouse", "wife": "Spouse", "husband": "Spouse",
+        "child": "Child", "son": "Child", "daughter": "Child",
+        "others": "Others",
+    }
+    consolidated_df["Relation"] = (
+        consolidated_df["Relation"]
+        .str.strip().str.lower()
+        .map(relation_map)
+        .fillna(consolidated_df["Relation"])
+    )
+
+    total_inactive = sum(f["inactive"] for f in summary_per_file)
+    summary = {
+        "per_file": summary_per_file,
+        "total_active": len(consolidated_df),
+        "total_inactive": total_inactive,
+    }
+    return consolidated_df, summary
 
 
 def analyze_census_file(df: pd.DataFrame) -> dict:
@@ -948,340 +1264,551 @@ def run_sop_analysis(data: dict, commissions: dict, company_name: str, plan: str
 
 
 # ---------------------------------------------------------------------------
-# EXCEL EXPORT — 6+ sheets with working formulas
+# EXCEL EXPORT — 3 sheets, styled to match Claims_Analysis reference template
 # ---------------------------------------------------------------------------
 
-def generate_quote_excel(summary: dict, data: dict, commissions: dict) -> bytes:
+# Template colours (matching reference Claims_Analysis_*.xlsx)
+XLS_NAVY = "003780"          # title bar + value-cell header text
+XLS_LABEL_FILL = "EEF3F8"    # left-column label cells
+XLS_SUBTITLE_CYAN = "35C5FC" # "from the Intake Form..." subtitle
+XLS_CURRENCY_FMT = '#,##0'
+XLS_PCT_FMT = '0.00%'
+XLS_DATE_FMT = '[$]dd\\ mmm\\ yyyy;@'
+
+
+def _parse_date(value):
+    """Parse a date string into a datetime; returns None on failure."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y",
+                "%Y/%m/%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def generate_quote_excel(
+    summary: dict,
+    data: dict,
+    commissions: dict,
+    prepared_by: str = "",
+    broker_name: str = "",
+    rm_name: str = "",
+) -> bytes:
     """
-    Generate a professional Excel workbook with 6+ tabs and working formulas.
-    Returns the file as bytes ready for download.
+    Build a 3-sheet workbook matching the Claims_Analysis_*.xlsx reference:
+      1. Prospect Info-Extracted
+      2. BC & Premium Calculation
+      3. Summary
+    All cross-sheet references and totals are live formulas so underwriters
+    can tweak inputs and see recalculated outputs. Returns xlsx bytes.
     """
     wb = Workbook()
 
-    # Styles
-    header_font = Font(name="Calibri", bold=True, size=12, color="FFFFFF")
-    header_fill = PatternFill(start_color="003780", end_color="003780", fill_type="solid")
-    sub_font = Font(name="Calibri", bold=True, size=11)
-    sub_fill = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
-    currency_fmt = '#,##0'
-    pct_fmt = '0.00%'
-    thin_border = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"),
-    )
+    # --- shared styles / helpers ---------------------------------------
+    thin = Side(style="thin")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    label_fill = PatternFill(start_color=XLS_LABEL_FILL, end_color=XLS_LABEL_FILL, fill_type="solid")
+    navy_fill = PatternFill(start_color=XLS_NAVY, end_color=XLS_NAVY, fill_type="solid")
+    white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+    label_font = Font(name="Calibri", size=12, color=XLS_NAVY)
+    value_font = Font(name="Calibri", size=12, color="000000")
+    section_font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+    section_fill = PatternFill(start_color=XLS_LABEL_FILL, end_color=XLS_LABEL_FILL, fill_type="solid")
 
-    def style_header(ws, row, max_col):
-        for col in range(1, max_col + 1):
-            cell = ws.cell(row=row, column=col)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = thin_border
+    def write_label(ws, coord, text):
+        c = ws[coord]
+        c.value = text
+        c.font = label_font
+        c.fill = label_fill
+        c.border = thin_border
 
-    def auto_width(ws):
-        for col in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                if cell.value:
-                    max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
+    def write_value(ws, coord, value, number_format=None, bold=False, font_color="000000"):
+        c = ws[coord]
+        c.value = value
+        c.font = Font(name="Calibri", size=12, color=font_color, bold=bold)
+        c.fill = white_fill
+        c.border = thin_border
+        if number_format:
+            c.number_format = number_format
+        return c
+
+    def write_note(ws, coord, text):
+        """Column-C explanatory note — grey italic-ish small text like reference."""
+        c = ws[coord]
+        c.value = text
+        c.font = Font(name="Calibri", size=11, color="5E788A")
+
+    def write_section_header(ws, coord, text):
+        c = ws[coord]
+        c.value = text
+        c.font = section_font
+        c.fill = section_fill
 
     # =======================================================================
-    # SHEET 1: EXECUTIVE SUMMARY
+    # SHEET 1: Prospect Info-Extracted
     # =======================================================================
     ws1 = wb.active
-    ws1.title = "Executive Summary"
+    ws1.title = "Prospect Info-Extracted"
 
-    rows = [
-        ["WellX Medical Underwriter — Executive Summary"],
-        [""],
-        ["Company Name", summary.get("company_name", "")],
-        ["Employer (from Report)", summary.get("employer_name_extracted", "")],
-        ["Report Date", datetime.now().strftime("%Y-%m-%d")],
-        [""],
-        ["KEY METRICS"],
-        ["Claims Paid (AED)", summary["claims_analysis"]["claims_paid"]],
-        ["Claims Outstanding (AED)", summary["claims_analysis"]["claims_outstanding"]],
-        ["Claims IBNR (AED)", summary["claims_analysis"]["claims_ibnr"]],
-        ["Total Incurred (AED)", summary["claims_analysis"]["total_incurred"]],
-        ["Outstanding Ratio", f"{summary['claims_analysis']['outstanding_ratio_pct']}%"],
-        ["IP Ratio", f"{summary['claims_analysis']['ip_ratio_pct']}%"],
-        [""],
-        ["CENSUS"],
-        ["Starting Census", summary["census_analysis"]["census_start"]],
-        ["Ending Census", summary["census_analysis"]["census_end"]],
-        ["Average Census", summary["census_analysis"]["avg_census"]],
-        ["Census Change", f"{summary['census_analysis']['census_change_pct']}%"],
-        [""],
-        ["BURNING COST"],
-        ["Highest Avg Monthly Claims", summary["burning_cost_analysis"]["highest_avg_monthly"]],
-        ["Burning Cost Per Capita (AED)", summary["burning_cost_analysis"]["burning_cost_per_capita"]],
-        ["Adjusted Burning Cost Per Capita", summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"]],
-        [""],
-        ["PREMIUM QUOTATION"],
-        ["Projected Annual Claims", summary["premium_quotation"]["projected_claims_annual"]],
-        ["Net Premium", summary["premium_quotation"]["net_premium"]],
-        ["Total Commission %", f"{summary['premium_quotation']['total_commission_pct']}%"],
-        ["Indicative Premium (AED)", summary["premium_quotation"]["indicative_premium"]],
-        ["Premium per Member/Year", summary["premium_quotation"]["premium_per_member_annual"]],
-        ["Premium per Member/Month", summary["premium_quotation"]["premium_per_member_monthly"]],
-        [""],
-        ["FLAGS & WARNINGS"],
+    # Column widths matching reference
+    widths1 = {"A": 72, "B": 20, "C": 23, "D": 9, "E": 20, "F": 11}
+    for letter, w in widths1.items():
+        ws1.column_dimensions[letter].width = w
+
+    # --- Title bar (rows 1-2) ---
+    ws1.merge_cells("A1:C1")
+    t1 = ws1["A1"]
+    t1.value = "Prospect Information"
+    t1.font = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
+    t1.fill = navy_fill
+    t1.alignment = Alignment(horizontal="left", vertical="center")
+    ws1.row_dimensions[1].height = 24
+
+    sub = ws1["A2"]
+    sub.value = "from the Intake Form and Extracted information"
+    sub.font = Font(name="Calibri", size=12, color=XLS_SUBTITLE_CYAN)
+    sub.fill = navy_fill
+    # Fill rest of row 2 navy for banded look
+    for col in ("B2", "C2"):
+        ws1[col].fill = navy_fill
+
+    # --- Intake / extracted info (rows 4-10) ---
+    company_name = summary.get("company_name", "") or ""
+    employer_extracted = summary.get("employer_name_extracted", "") or ""
+    employer_match = (summary.get("validations") or {}).get("employer_match", False)
+    plan_value = (summary.get("premium_quotation") or {}).get("plan", "") or ""
+
+    expiry_raw = (summary.get("validations") or {}).get("policy_expiry_date", "")
+    expiry_dt = _parse_date(expiry_raw)
+
+    write_label(ws1, "A4", "Company Name")
+    write_value(ws1, "B4", company_name)
+
+    write_label(ws1, "A5", "Company Name  (from Report)")
+    write_value(ws1, "B5", employer_extracted)
+    if employer_match:
+        write_note(ws1, "C5", "Company Names matching")
+    elif employer_extracted:
+        write_note(ws1, "C5", "Company Names NOT matching")
+
+    write_label(ws1, "A6", "Expiry Date")
+    if expiry_dt:
+        c = write_value(ws1, "B6", expiry_dt, number_format=XLS_DATE_FMT)
+        c.alignment = Alignment(horizontal="center")
+    else:
+        write_value(ws1, "B6", expiry_raw or "")
+
+    write_label(ws1, "A8", "Broker")
+    write_value(ws1, "B8", broker_name)
+
+    write_label(ws1, "A9", "Relationship Manager")
+    write_value(ws1, "B9", rm_name)
+
+    write_label(ws1, "A10", "Plan")
+    write_value(ws1, "B10", plan_value)
+
+    # --- CLAIMS OVERVIEW (rows 12-16) ---
+    write_section_header(ws1, "A12", "CLAIMS OVERVIEW")
+
+    ca = summary.get("claims_analysis", {}) or {}
+    write_label(ws1, "A13", "Claims Paid (AED)")
+    write_value(ws1, "B13", float(ca.get("claims_paid", 0) or 0), number_format=XLS_CURRENCY_FMT)
+
+    write_label(ws1, "A14", "Claims Outstanding (AED)")
+    write_value(ws1, "B14", float(ca.get("claims_outstanding", 0) or 0), number_format=XLS_CURRENCY_FMT)
+    cc14 = ws1["C14"]
+    cc14.value = "=B14/$B$13"
+    cc14.number_format = XLS_PCT_FMT
+    cc14.font = Font(name="Calibri", size=11, color="5E788A")
+
+    write_label(ws1, "A15", "Claims IBNR (AED)")
+    write_value(ws1, "B15", float(ca.get("claims_ibnr", 0) or 0), number_format=XLS_CURRENCY_FMT)
+
+    write_label(ws1, "A16", "Total Incurred (AED)")
+    c16 = write_value(ws1, "B16", "=SUM(B13:B15)", number_format=XLS_CURRENCY_FMT, bold=True)
+    ws1["A16"].font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+
+    # --- CLAIMS BY TYPE (rows 20-26) ---
+    write_section_header(ws1, "A20", "CLAIMS BY TYPE")
+
+    totals = ((data.get("claims_by_member_type") or {}).get("totals")) or {}
+    type_rows = [
+        ("IP", totals.get("ip", 0)),
+        ("OP", totals.get("op", 0)),
+        ("Pharmacy", totals.get("pharmacy", 0)),
+        ("Dental", totals.get("dental", 0)),
+        ("Optical", totals.get("optical", 0)),
     ]
-    for flag in summary.get("flags", []):
-        rows.append(["⚠ " + flag])
+    for i, (lbl, val) in enumerate(type_rows):
+        r = 21 + i
+        write_label(ws1, f"A{r}", lbl)
+        write_value(ws1, f"B{r}", float(val or 0), number_format=XLS_CURRENCY_FMT)
+        cc = ws1[f"C{r}"]
+        cc.value = f"=B{r}/$B$26"
+        cc.number_format = XLS_PCT_FMT
+        cc.font = Font(name="Calibri", size=11, color="5E788A")
 
-    for r_idx, row_data in enumerate(rows, 1):
-        for c_idx, val in enumerate(row_data, 1):
-            cell = ws1.cell(row=r_idx, column=c_idx, value=val)
-            cell.border = thin_border
-            if r_idx == 1:
-                cell.font = Font(name="Calibri", bold=True, size=14, color="003780")
-            elif val in ("KEY METRICS", "CENSUS", "BURNING COST", "PREMIUM QUOTATION", "FLAGS & WARNINGS"):
-                cell.font = sub_font
-                cell.fill = sub_fill
+    # Row 26: sum of claims-by-type
+    sum_cell = ws1["B26"]
+    sum_cell.value = "=SUM(B21:B25)"
+    sum_cell.number_format = XLS_CURRENCY_FMT
+    sum_cell.font = Font(name="Calibri", bold=True, size=12, color="000000")
+    sum_cell.border = thin_border
+    write_note(ws1, "C26", "Matching with claims paid")
 
-    auto_width(ws1)
+    # --- CENSUS INFORMATION (rows 29-34) ---
+    write_section_header(ws1, "A29", "CENSUS INFORMATION")
+
+    census = summary.get("census_analysis", {}) or {}
+    write_label(ws1, "A30", "Starting Census")
+    write_value(ws1, "B30", int(census.get("census_start", 0) or 0))
+
+    write_label(ws1, "A31", "Ending Census")
+    write_value(ws1, "B31", int(census.get("census_end", 0) or 0))
+
+    write_label(ws1, "A33", "Average Census")
+    write_value(ws1, "B33", "=AVERAGE(B30:B31)")
+
+    write_label(ws1, "A34", "Census Change")
+    write_value(ws1, "B34", "=B31/B30-1", number_format=XLS_PCT_FMT)
+
+    # --- TOP 10 DIAGNOSES / PROVIDERS (rows 37-39) ---
+    diag_values = data.get("diagnosis_top10_values", []) or []
+    prov_values = data.get("provider_top10_values", []) or []
+    diag_total = sum(float(d.get("total", 0) or 0) for d in diag_values)
+    prov_total = sum(float(p.get("total", 0) or 0) for p in prov_values)
+
+    write_label(ws1, "A37", "TOP 10 DIAGNOSES TOTAL")
+    write_value(ws1, "B37", diag_total, number_format=XLS_CURRENCY_FMT)
+    cc = ws1["C37"]
+    cc.value = "=B37/$B$13"
+    cc.number_format = XLS_PCT_FMT
+    cc.font = Font(name="Calibri", size=11, color="5E788A")
+
+    write_label(ws1, "A39", "TOP 10 PROVIDERS TOTAL")
+    write_value(ws1, "B39", prov_total, number_format=XLS_CURRENCY_FMT)
+    cc = ws1["C39"]
+    cc.value = "=B39/$B$13"
+    cc.number_format = XLS_PCT_FMT
+    cc.font = Font(name="Calibri", size=11, color="5E788A")
+
+    # --- Monthly Claims (rows 42-53) ---
+    write_section_header(ws1, "A42", "Monthly Claims")
+
+    monthly = data.get("monthly_claims", []) or []
+    # Keep up to 10 rows; row 43..52 match the reference's fixed block
+    for i in range(10):
+        r = 43 + i
+        if i < len(monthly):
+            m = monthly[i]
+            month_lbl = f"{m.get('month', '')} {m.get('year', '')}".strip()
+            write_label(ws1, f"A{r}", month_lbl)
+            write_value(
+                ws1, f"B{r}",
+                float(m.get("value", 0) or 0),
+                number_format=XLS_CURRENCY_FMT,
+            )
+        else:
+            write_label(ws1, f"A{r}", "")
+            write_value(ws1, f"B{r}", None, number_format=XLS_CURRENCY_FMT)
+
+    sum53 = ws1["B53"]
+    sum53.value = "=SUM(B43:B52)"
+    sum53.number_format = XLS_CURRENCY_FMT
+    sum53.font = Font(name="Calibri", bold=True, size=12, color="000000")
+    sum53.border = thin_border
+    write_note(ws1, "C53", "Matching with claims paid")
+
+    # --- COMPLEX CASES (row 55+) ---
+    write_section_header(ws1, "A55", "COMPLEX CASES")
+    flagged = (summary.get("diagnosis_analysis") or {}).get("flagged_conditions", []) or []
+    next_row = 56
+    if flagged:
+        for i, item in enumerate(flagged):
+            r = 56 + i
+            c = ws1[f"A{r}"]
+            c.value = item
+            c.font = Font(name="Calibri", size=12, color="000000")
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            next_row = r + 1
+    else:
+        ws1["A56"].value = "None flagged"
+        ws1["A56"].font = Font(name="Calibri", size=12, color="5E788A")
+        next_row = 57
+
+    # Prepared-by footer (two rows below last complex-case)
+    now = datetime.now()
+    prep_text = f"Prepared by: {prepared_by or '—'} on {now.strftime('%d %b %Y')} at {now.strftime('%I:%M %p').lstrip('0')}"
+    footer = ws1[f"A{next_row + 1}"]
+    footer.value = prep_text
+    footer.font = Font(name="Calibri", italic=True, size=11, color="5E788A")
 
     # =======================================================================
-    # SHEET 2: CLAIMS ANALYSIS
+    # SHEET 2: BC & Premium Calculation
     # =======================================================================
-    ws2 = wb.create_sheet("Claims Analysis")
+    ws2 = wb.create_sheet("BC & Premium Calculation")
 
-    ws2.cell(row=1, column=1, value="Section 5 — Claims Values")
-    ws2.cell(row=2, column=1, value="Category")
-    ws2.cell(row=2, column=2, value="Amount (AED)")
-    style_header(ws2, 2, 2)
+    widths2 = {"A": 30, "B": 18, "C": 18, "D": 28, "E": 22}
+    for letter, w in widths2.items():
+        ws2.column_dimensions[letter].width = w
 
-    ws2.cell(row=3, column=1, value="Claims Paid")
-    ws2.cell(row=3, column=2, value=summary["claims_analysis"]["claims_paid"])
-    ws2.cell(row=4, column=1, value="Claims Outstanding")
-    ws2.cell(row=4, column=2, value=summary["claims_analysis"]["claims_outstanding"])
-    ws2.cell(row=5, column=1, value="Claims IBNR")
-    ws2.cell(row=5, column=2, value=summary["claims_analysis"]["claims_ibnr"])
-    ws2.cell(row=6, column=1, value="Total Incurred")
-    ws2.cell(row=6, column=2).value = "=SUM(B3:B5)"  # Working formula
-    ws2.cell(row=6, column=1).font = Font(bold=True)
+    # Header row (row 1) — navy fill, white text, centred
+    headers = ["Monthly Claims", "Paid Claims", "Claims Haircut", "Selected Claims after Haircut", "Selected"]
+    for idx, h in enumerate(headers):
+        c = ws2.cell(row=1, column=idx + 1, value=h)
+        c.font = Font(name="Calibri", bold=True, size=12, color="FFFFFF")
+        c.fill = navy_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = thin_border
 
-    ws2.cell(row=8, column=1, value="Outstanding Ratio")
-    ws2.cell(row=8, column=2).value = "=B4/B3"  # Working formula
-    ws2.cell(row=8, column=2).number_format = pct_fmt
-    ws2.cell(row=9, column=1, value="Benchmark")
-    ws2.cell(row=9, column=2, value=">20%")
+    # Monthly rows (2..11)
+    monthly_included = st.session_state.get("monthly_included", []) if hasattr(st, "session_state") else []
+    for i in range(10):
+        r = 2 + i
+        if i < len(monthly):
+            m = monthly[i]
+            ws2.cell(row=r, column=1, value=f"{m.get('month', '')} {m.get('year', '')}".strip())
+            ws2.cell(row=r, column=2, value=float(m.get("value", 0) or 0)).number_format = XLS_CURRENCY_FMT
+            ws2.cell(row=r, column=3, value=0).number_format = XLS_CURRENCY_FMT
+            # Determine default selected state: use session flag if available, else first/last excluded
+            if monthly_included and i < len(monthly_included):
+                selected = bool(monthly_included[i])
+            else:
+                selected = not (i == 0 or i == len(monthly) - 1)
+            # D is live-linked to E: toggling the Selected checkbox recalculates the average.
+            d = ws2.cell(row=r, column=4, value=f'=IF(E{r},B{r}-C{r},"")')
+            d.number_format = XLS_CURRENCY_FMT
+            ws2.cell(row=r, column=5, value=selected)
+        else:
+            ws2.cell(row=r, column=5, value=False)
 
-    # IP Ratio section
-    ws2.cell(row=11, column=1, value="Section 8 — IP Ratio")
-    ws2.cell(row=12, column=1, value="IP Claims Total")
-    ws2.cell(row=12, column=2, value=summary["claims_analysis"]["ip_total"])
-    ws2.cell(row=13, column=1, value="All Claims Total (S8)")
-    ws2.cell(row=13, column=2, value=summary["claims_analysis"]["claims_total_section8"])
-    ws2.cell(row=14, column=1, value="IP Ratio")
-    ws2.cell(row=14, column=2).value = "=B12/B13"  # Working formula
-    ws2.cell(row=14, column=2).number_format = pct_fmt
-    ws2.cell(row=15, column=1, value="Benchmark")
-    ws2.cell(row=15, column=2, value="20-25%")
+        for col in range(1, 6):
+            ws2.cell(row=r, column=col).border = thin_border
 
-    for row in ws2.iter_rows(min_row=3, max_row=15, max_col=2):
-        for cell in row:
-            cell.border = thin_border
-            if isinstance(cell.value, (int, float)) and cell.number_format == 'General':
-                cell.number_format = currency_fmt
+    # Row 12: sum of Paid Claims
+    s12 = ws2.cell(row=12, column=2, value="=SUM(B2:B11)")
+    s12.number_format = XLS_CURRENCY_FMT
+    s12.font = Font(name="Calibri", bold=True, size=12)
+    s12.border = thin_border
 
-    auto_width(ws2)
+    # --- BURNING COST CALCULATION block ---
+    bc = summary.get("burning_cost_analysis", {}) or {}
 
-    # =======================================================================
-    # SHEET 3: CENSUS
-    # =======================================================================
-    ws3 = wb.create_sheet("Census")
+    hdr14 = ws2["A14"]
+    hdr14.value = "BURNING COST CALCULATION"
+    hdr14.font = Font(name="Calibri", bold=True, size=12, color="FFFFFF")
+    hdr14.fill = navy_fill
+    hdr14.alignment = Alignment(horizontal="left", vertical="center")
+    for col in ("B14", "C14"):
+        ws2[col].fill = navy_fill
 
-    ws3.cell(row=1, column=1, value="Census Analysis")
-    ws3.cell(row=2, column=1, value="Metric")
-    ws3.cell(row=2, column=2, value="Value")
-    style_header(ws3, 2, 2)
-
-    ws3.cell(row=3, column=1, value="Starting Census (S6)")
-    ws3.cell(row=3, column=2, value=summary["census_analysis"]["census_start"])
-    ws3.cell(row=4, column=1, value="Ending Census (S7)")
-    ws3.cell(row=4, column=2, value=summary["census_analysis"]["census_end"])
-    ws3.cell(row=5, column=1, value="Average Census")
-    ws3.cell(row=5, column=2).value = "=(B3+B4)/2"  # Working formula
-    ws3.cell(row=6, column=1, value="Census Change %")
-    ws3.cell(row=6, column=2).value = "=(B4-B3)/B3"  # Working formula
-    ws3.cell(row=6, column=2).number_format = pct_fmt
-    ws3.cell(row=7, column=1, value="Benchmark")
-    ws3.cell(row=7, column=2, value="±15%")
-
-    for row in ws3.iter_rows(min_row=3, max_row=7, max_col=2):
-        for cell in row:
-            cell.border = thin_border
-
-    auto_width(ws3)
-
-    # =======================================================================
-    # SHEET 4: MONTHLY CLAIMS & BURNING COST
-    # =======================================================================
-    ws4 = wb.create_sheet("Burning Cost")
-
-    ws4.cell(row=1, column=1, value="Section 17 — Monthly Claims & Burning Cost")
-    ws4.cell(row=2, column=1, value="Month")
-    ws4.cell(row=2, column=2, value="Year")
-    ws4.cell(row=2, column=3, value="Value (AED)")
-    style_header(ws4, 2, 3)
-
-    monthly = data.get("monthly_claims", [])
-    for i, m in enumerate(monthly):
-        r = 3 + i
-        ws4.cell(row=r, column=1, value=m.get("month", ""))
-        ws4.cell(row=r, column=2, value=m.get("year", ""))
-        ws4.cell(row=r, column=3, value=float(m.get("value", 0) or 0))
-        ws4.cell(row=r, column=3).number_format = currency_fmt
-
-    last_data_row = 3 + len(monthly) - 1
-    sum_row = last_data_row + 2
-
-    ws4.cell(row=sum_row, column=1, value="Monthly Sum")
-    ws4.cell(row=sum_row, column=1).font = Font(bold=True)
-    ws4.cell(row=sum_row, column=3).value = f"=SUM(C3:C{last_data_row})"
-    ws4.cell(row=sum_row, column=3).number_format = currency_fmt
-
-    bc_row = sum_row + 2
-    ws4.cell(row=bc_row, column=1, value="BURNING COST CALCULATION")
-    ws4.cell(row=bc_row, column=1).font = sub_font
-    ws4.cell(row=bc_row, column=1).fill = sub_fill
-    ws4.merge_cells(start_row=bc_row, start_column=1, end_row=bc_row, end_column=3)
-
-    bc_items = [
-        ("Policy Start Day", summary["burning_cost_analysis"]["policy_start_day"]),
-        ("Method", summary["burning_cost_analysis"]["method"]),
-        ("Incurred Months", summary["burning_cost_analysis"]["n_incurred_months"]),
-        ("Average A", summary["burning_cost_analysis"]["avg_a"]),
-        ("Average B", summary["burning_cost_analysis"]["avg_b"]),
-        ("Average C", summary["burning_cost_analysis"]["avg_c"]),
-        ("Highest Average Monthly", summary["burning_cost_analysis"]["highest_avg_monthly"]),
-        ("Average Census", summary["census_analysis"]["avg_census"]),
-        ("Burning Cost Per Capita", summary["burning_cost_analysis"]["burning_cost_per_capita"]),
-        ("Inflation Adjustment (+5%)", f"{summary['burning_cost_analysis']['inflation_pct']}%"),
-        ("IP Adjustment", f"{summary['burning_cost_analysis']['ip_adjustment_pct']}%"),
-        ("Outstanding Adjustment", f"{summary['burning_cost_analysis']['outstanding_adjustment_pct']}%"),
-        ("Adjusted Burning Cost Per Capita", summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"]),
+    # Rows 15-34
+    bc_rows = [
+        ("A15", "Policy Start Day", "B15", int(bc.get("policy_start_day", 1) or 1), None, None),
+        ("A16", "Incurred Months", "B16", int(bc.get("n_incurred_months", 0) or 0), None, None),
+        ("A18", "Monthly Average", "B18", "=AVERAGE(D2:D11)", XLS_CURRENCY_FMT, None),
+        ("A19", "Average Census", "B19", "='Prospect Info-Extracted'!B33", None, None),
+        ("A20", "Monthly Burning Cost Per Capita", "B20", "=B18/B19", XLS_CURRENCY_FMT, None),
+        ("A22", "Inflation Adjustment", "B22", float(bc.get("inflation_pct", 0) or 0) / 100, XLS_PCT_FMT, None),
+        ("A23", "IP Adjustment", "B23", float(bc.get("ip_adjustment_pct", 0) or 0) / 100, XLS_PCT_FMT, None),
+        ("A24", "Outstanding Adjustment", "B24", float(bc.get("outstanding_adjustment_pct", 0) or 0) / 100, XLS_PCT_FMT, None),
+        ("A25", "Adjusted Monthly Burning Cost Per Capita ", "B25", "=B20*(1+SUM(B22:B24))", XLS_CURRENCY_FMT, None),
+        ("A27", "Yearly Burning Cost per Capita", "B27", "=B25*12", XLS_CURRENCY_FMT, "Expected annual claims per member"),
+        ("A28", "Current Census", "B28",
+            int((summary.get("premium_quotation") or {}).get("current_census", 0) or 0), None, None),
+        ("A30", "Over reporting Haircut (%)", "B30", 0.10, XLS_PCT_FMT, "i.e. (assumed over reported claims)"),
+        ("A31", "Major Claims Allowance", "B31", 150000, XLS_CURRENCY_FMT, None),
+        ("A34", "Yearly Burning Cost", "B34", "=(B27*B28)*(1-B30)+B31", XLS_CURRENCY_FMT, "Expected annual claims"),
     ]
-    for j, (label, val) in enumerate(bc_items):
-        r = bc_row + 1 + j
-        ws4.cell(row=r, column=1, value=label)
-        ws4.cell(row=r, column=2, value=val)
-        ws4.cell(row=r, column=1).border = thin_border
-        ws4.cell(row=r, column=2).border = thin_border
-        if isinstance(val, (int, float)):
-            ws4.cell(row=r, column=2).number_format = currency_fmt
+    for a_coord, label, b_coord, value, nf, note in bc_rows:
+        write_label(ws2, a_coord, label)
+        c = write_value(ws2, b_coord, value, number_format=nf)
+        if note:
+            c_coord = "C" + b_coord[1:]
+            write_note(ws2, c_coord, note)
 
-    auto_width(ws4)
+    # --- INDICATIVE PREMIUM block ---
+    hdr36 = ws2["A36"]
+    hdr36.value = "INDICATIVE PREMIUM"
+    hdr36.font = Font(name="Calibri", bold=True, size=12, color="FFFFFF")
+    hdr36.fill = navy_fill
+    for col in ("B36", "C36"):
+        ws2[col].fill = navy_fill
+
+    write_label(ws2, "A39", "INDICATIVE PREMIUM")
+    ws2["A39"].font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+    ws2["A39"].fill = label_fill
+    ws2["A39"].border = thin_border
+    ip_cell = write_value(ws2, "B39", "=B34/(1-B47)", number_format=XLS_CURRENCY_FMT, bold=True, font_color=XLS_NAVY)
+
+    # Row 40 — average premium helper
+    avg_cell = write_value(ws2, "B40", "=B39/B28", number_format=XLS_CURRENCY_FMT)
+    write_note(ws2, "C40", "average premium")
+
+    # Commission rows (42-46) — populated from commissions dict based on plan
+    plan = (summary.get("premium_quotation") or {}).get("plan", "")
+
+    # Choose ordered commission keys that match the reference layout:
+    # Row 42 = Broker, 43 = platform secondary (QIC/DNI), 44 = Healthx/OpenX (platform),
+    # 45 = NAS, 46 = Reinsurance Margin (+ insurance tax/RI broker folded in if present)
+    comm_ordered: list[tuple[str, float]] = []
+    broker_label = f"Broker ({broker_name})" if broker_name else "Broker"
+    broker_pct = float(commissions.get("Broker", commissions.get("broker", 0)) or 0)
+    comm_ordered.append((broker_label, broker_pct))
+
+    if "QIC" in commissions:
+        comm_ordered.append(("QIC", float(commissions.get("QIC", 0) or 0)))
+    elif "DNI" in commissions:
+        comm_ordered.append(("DNI", float(commissions.get("DNI", 0) or 0)))
+    else:
+        comm_ordered.append(("Insurance Tax", float(commissions.get("Insurance Tax", 0) or 0)))
+
+    if "HealthX" in commissions:
+        platform_label, platform_pct = "Healthx", float(commissions.get("HealthX", 0) or 0)
+    elif "OpenX" in commissions:
+        platform_label, platform_pct = "OpenX", float(commissions.get("OpenX", 0) or 0)
+    else:
+        platform_label, platform_pct = "Healthx", 0.0
+    comm_ordered.append((platform_label, platform_pct))
+
+    comm_ordered.append(("Nas", float(commissions.get("NAS", commissions.get("Nas", 0)) or 0)))
+
+    # Row 46: bundle remaining (RI Broker + Insurance Tax + Reinsurance Margin)
+    ri_margin = float(commissions.get("Reinsurance Margin", 0) or 0)
+    # If plan has RI Broker + Insurance Tax as separate, roll them into row 46 label
+    extras = 0.0
+    extra_labels = []
+    if plan and "OpenX" in plan:
+        extras += float(commissions.get("RI Broker", 0) or 0)
+        extras += float(commissions.get("Insurance Tax", 0) or 0)
+        if commissions.get("RI Broker", 0):
+            extra_labels.append("RI Broker")
+        if commissions.get("Insurance Tax", 0):
+            extra_labels.append("Ins. Tax")
+    ri_label = "Reinsurance Margin" if not extra_labels else f"Reinsurance Margin (+{', '.join(extra_labels)})"
+    comm_ordered.append((ri_label, ri_margin + extras))
+
+    # Write rows 42..46
+    for j, (lbl, pct) in enumerate(comm_ordered[:5]):
+        r = 42 + j
+        write_label(ws2, f"A{r}", lbl)
+        write_value(ws2, f"B{r}", float(pct) / 100.0, number_format=XLS_PCT_FMT)
+        cc = ws2[f"C{r}"]
+        cc.value = f"=B{r}*$B$39"
+        cc.number_format = XLS_CURRENCY_FMT
+        cc.font = value_font
+        cc.border = thin_border
+
+    # D44 / E44: per-member AED + minimum note (reference row 44)
+    d44 = ws2["D44"]
+    d44.value = "=C44/$B$28"
+    d44.number_format = XLS_CURRENCY_FMT
+    d44.font = value_font
+    d44.border = thin_border
+
+    e44 = ws2["E44"]
+    e44.value = "AED 110 (USD 30) minimum"
+    e44.font = Font(name="Calibri", size=11, color="5E788A")
+
+    # Row 47: total commission
+    t47 = ws2["B47"]
+    t47.value = "=SUM(B42:B46)"
+    t47.number_format = XLS_PCT_FMT
+    t47.font = Font(name="Calibri", bold=True, size=12)
+    t47.border = thin_border
 
     # =======================================================================
-    # SHEET 5: PREMIUM QUOTATION
+    # SHEET 3: Summary
     # =======================================================================
-    ws5 = wb.create_sheet("Premium Quotation")
+    ws3 = wb.create_sheet("Summary")
+    ws3.column_dimensions["A"].width = 28
+    ws3.column_dimensions["B"].width = 22
+    ws3.column_dimensions["C"].width = 32
 
-    ws5.cell(row=1, column=1, value="Premium Quotation")
-    ws5.cell(row=1, column=1).font = Font(name="Calibri", bold=True, size=14, color="003780")
+    title3 = ws3["A1"]
+    title3.value = "Executive Summary"
+    title3.font = Font(name="Calibri", bold=True, size=14, color=XLS_NAVY)
 
-    ws5.cell(row=3, column=1, value="Parameter")
-    ws5.cell(row=3, column=2, value="Value")
-    style_header(ws5, 3, 2)
+    write_label(ws3, "A3", "Company Name")
+    write_value(ws3, "B3", company_name)
 
-    ws5.cell(row=4, column=1, value="Adjusted Burning Cost Per Capita (AED)")
-    ws5.cell(row=4, column=2, value=summary["burning_cost_analysis"]["adjusted_burning_cost_per_capita"])
-    ws5.cell(row=5, column=1, value="Current Census")
-    ws5.cell(row=5, column=2, value=summary["premium_quotation"]["current_census"])
-    ws5.cell(row=6, column=1, value="Projected Annual Claims")
-    ws5.cell(row=6, column=2).value = "=B4*12*B5"  # Working formula
-    ws5.cell(row=6, column=2).number_format = currency_fmt
+    write_label(ws3, "A4", "Expiry Date")
+    if expiry_dt:
+        ce = write_value(ws3, "B4", expiry_dt, number_format=XLS_DATE_FMT)
+        ce.alignment = Alignment(horizontal="center")
+    else:
+        write_value(ws3, "B4", expiry_raw or "")
 
-    ws5.cell(row=8, column=1, value="COMMISSIONS")
-    ws5.cell(row=8, column=1).font = sub_font
-    ws5.cell(row=8, column=1).fill = sub_fill
+    write_label(ws3, "A6", "Broker")
+    write_value(ws3, "B6", broker_name)
 
-    comm_items = [
-        ("Broker", commissions.get("broker", 10)),
-        ("Insurer", commissions.get("insurer", 0.5)),
-        ("TPA", commissions.get("tpa", 4)),
-        ("WellX", commissions.get("wellx", 4)),
-        ("Margins", commissions.get("margins", 7)),
-    ]
-    for j, (label, val) in enumerate(comm_items):
-        r = 9 + j
-        ws5.cell(row=r, column=1, value=label)
-        ws5.cell(row=r, column=2, value=val / 100)
-        ws5.cell(row=r, column=2).number_format = pct_fmt
+    write_label(ws3, "A7", "Relationship Manager")
+    write_value(ws3, "B7", rm_name)
 
-    total_comm_row = 9 + len(comm_items)
-    ws5.cell(row=total_comm_row, column=1, value="Total Commission")
-    ws5.cell(row=total_comm_row, column=1).font = Font(bold=True)
-    ws5.cell(row=total_comm_row, column=2).value = f"=SUM(B9:B{total_comm_row - 1})"
-    ws5.cell(row=total_comm_row, column=2).number_format = pct_fmt
+    # Email draft (rows 9-10, merged, wrap text)
+    eh = ws3["A9"]
+    eh.value = "Email Draft"
+    eh.font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+    eh.fill = label_fill
 
-    prem_row = total_comm_row + 2
-    ws5.cell(row=prem_row, column=1, value="Net Premium (AED)")
-    ws5.cell(row=prem_row, column=2).value = "=B6"  # Same as projected claims by default
-    ws5.cell(row=prem_row, column=2).number_format = currency_fmt
+    expiry_str = expiry_dt.strftime("%d %b %Y") if expiry_dt else (expiry_raw or "TBD")
+    email_body = (
+        f"Hi {rm_name or 'Team'}, \n\n"
+        f"Please see below INDICATIVE premium for {company_name or 'the prospect'} "
+        f"whose policy is expiring on {expiry_str}, thru {broker_name or 'the broker'}:"
+    )
+    ws3.merge_cells("A10:C10")
+    em = ws3["A10"]
+    em.value = email_body
+    em.font = Font(name="Calibri", size=11, color="000000")
+    em.alignment = Alignment(wrap_text=True, vertical="top")
+    ws3.row_dimensions[10].height = 60
 
-    ws5.cell(row=prem_row + 1, column=1, value="Indicative Premium (AED)")
-    ws5.cell(row=prem_row + 1, column=1).font = Font(bold=True, size=12, color="003780")
-    ws5.cell(row=prem_row + 1, column=2).value = f"=B{prem_row}/(1-B{total_comm_row})"
-    ws5.cell(row=prem_row + 1, column=2).number_format = currency_fmt
-    ws5.cell(row=prem_row + 1, column=2).font = Font(bold=True, size=12, color="003780")
+    # Premium figures (rows 13-15) — cross-sheet references to sheet 2
+    write_label(ws3, "A13", "INDICATIVE PREMIUM")
+    ws3["A13"].font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+    write_value(
+        ws3, "B13",
+        "='BC & Premium Calculation'!B39",
+        number_format=XLS_CURRENCY_FMT, bold=True, font_color=XLS_NAVY,
+    )
 
-    ws5.cell(row=prem_row + 3, column=1, value="Premium per Member / Year")
-    ws5.cell(row=prem_row + 3, column=2).value = f"=B{prem_row + 1}/B5"
-    ws5.cell(row=prem_row + 3, column=2).number_format = currency_fmt
+    write_label(ws3, "A14", "Census")
+    write_value(ws3, "B14", "='BC & Premium Calculation'!B19")
 
-    ws5.cell(row=prem_row + 4, column=1, value="Premium per Member / Month")
-    ws5.cell(row=prem_row + 4, column=2).value = f"=B{prem_row + 3}/12"
-    ws5.cell(row=prem_row + 4, column=2).number_format = currency_fmt
+    write_label(ws3, "A15", "Per Capita")
+    write_value(ws3, "B15", "=B13/B14", number_format=XLS_CURRENCY_FMT)
 
-    for row in ws5.iter_rows(min_row=4, max_row=prem_row + 4, max_col=2):
-        for cell in row:
-            cell.border = thin_border
+    # AI findings (rows 17-18) — merged, wrap-text
+    fh = ws3["A17"]
+    fh.value = "AI Underwriter Findings & Additional requirements"
+    fh.font = Font(name="Calibri", bold=True, size=12, color=XLS_NAVY)
+    fh.fill = label_fill
 
-    auto_width(ws5)
+    flags = summary.get("flags", []) or []
+    if flags:
+        findings_text = "\n".join(f"• {f}" for f in flags)
+    else:
+        findings_text = (
+            "{Prompt: Mention all the flags here. i.e. Ask for recent report if report "
+            "is more than 90 days, ask for monthly census if more than 10%, ask for recent "
+            "medical report and lab results for ongoing major conditions, et al.}"
+        )
+    ws3.merge_cells("A18:C18")
+    ff = ws3["A18"]
+    ff.value = findings_text
+    ff.font = Font(name="Calibri", size=11, color="000000")
+    ff.alignment = Alignment(wrap_text=True, vertical="top")
+    # Dynamic row height based on number of lines
+    ws3.row_dimensions[18].height = max(60, min(30 + 15 * (findings_text.count("\n") + 1), 320))
 
-    # =======================================================================
-    # SHEET 6: DIAGNOSIS & PROVIDERS
-    # =======================================================================
-    ws6 = wb.create_sheet("Diagnosis & Providers")
-
-    ws6.cell(row=1, column=1, value="Top 10 Diagnoses by Value (Section 10)")
-    ws6.cell(row=2, column=1, value="Diagnosis")
-    ws6.cell(row=2, column=2, value="IP (AED)")
-    ws6.cell(row=2, column=3, value="OP (AED)")
-    ws6.cell(row=2, column=4, value="Total (AED)")
-    ws6.cell(row=2, column=5, value="Claims Count")
-    ws6.cell(row=2, column=6, value="Per Claim (AED)")
-    style_header(ws6, 2, 6)
-
-    diag_values = data.get("diagnosis_top10_values", [])
-    diag_counts = data.get("diagnosis_top10_counts", [])
-
-    for i, diag in enumerate(diag_values):
-        r = 3 + i
-        ws6.cell(row=r, column=1, value=diag.get("diagnosis", ""))
-        ws6.cell(row=r, column=2, value=float(diag.get("ip", 0) or 0))
-        ws6.cell(row=r, column=3, value=float(diag.get("op", 0) or 0))
-        ws6.cell(row=r, column=4, value=float(diag.get("total", 0) or 0))
-        count = 0
-        if i < len(diag_counts):
-            count = float(diag_counts[i].get("total", 0) or 0)
-        ws6.cell(row=r, column=5, value=count)
-        # Per-claim formula
-        ws6.cell(row=r, column=6).value = f"=IF(E{r}>0,D{r}/E{r},0)"
-        for c in range(2, 7):
-            ws6.cell(row=r, column=c).number_format = currency_fmt
-            ws6.cell(row=r, column=c).border = thin_border
-        ws6.cell(row=r, column=1).border = thin_border
-
-    auto_width(ws6)
-
-    # Save to bytes
+    # --- Save to bytes ---
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
@@ -1683,6 +2210,16 @@ def render_sidebar():
 
         st.markdown("---")
 
+        # Underwriter identity — stamped into Excel exports
+        st.session_state["prepared_by"] = st.text_input(
+            "Prepared by",
+            value=st.session_state.get("prepared_by", ""),
+            placeholder="e.g. Jasper",
+            help="Name shown in the 'Prepared by' footer of the downloaded Excel.",
+        )
+
+        st.markdown("---")
+
         # Footer matching the subtle brand text
         st.markdown("""
         <div style="font-size:0.68rem; color:rgba(255,255,255,0.3); line-height:1.5; padding:8px 0;">
@@ -2007,10 +2544,11 @@ def page_new_quote():
             key="dha_upload",
         )
     with col_up2:
-        census_file = st.file_uploader(
-            "Census File (Excel/CSV)",
+        census_files = st.file_uploader(
+            "Census File(s) (Excel/CSV)",
             type=["xlsx", "xls", "csv"],
-            help="Member census with columns: RELATION, GENDER, Date Of Birth",
+            accept_multiple_files=True,
+            help="Upload one or multiple census files. Supports Liva/Nextcare, MaxHealth/Chrome, and standard formats. Files are auto-detected and consolidated.",
             key="census_upload",
         )
 
@@ -2072,28 +2610,64 @@ def page_new_quote():
 
     # --- Analyze Button ---
     if st.button("🚀 Analyze & Generate Quote", type="primary", use_container_width=True):
-        if not uploaded_file and not census_file:
+        if not uploaded_file and not census_files:
             st.error("Please upload at least a DHA report or census file.")
             return
         if not company_name:
             st.error("Please enter the Company / Employer name.")
             return
 
-        # ── Census analysis (always run if census file provided) ──
+        # ── Census analysis (always run if census file(s) provided) ──
         census_analysis = None
         census_df = None
-        if census_file:
+        if census_files:
             try:
-                ext = census_file.name.split(".")[-1].lower()
-                if ext == "csv":
-                    census_df = pd.read_csv(census_file)
-                else:
-                    census_df = pd.read_excel(census_file)
-                census_analysis = analyze_census_file(census_df)
+                # Always run through consolidation pipeline — it auto-detects
+                # Liva/Nextcare, MaxHealth/Chrome, and standard formats, handles
+                # header-row detection, and filters to active members only.
+                census_df, consolidation_summary = consolidate_census_files(census_files)
+                st.session_state["census_consolidation_summary"] = consolidation_summary
+
+                total_active = consolidation_summary["total_active"]
+                total_inactive = consolidation_summary["total_inactive"]
+                file_count = len(consolidation_summary["per_file"])
+                has_errors = any(fi.get("error") for fi in consolidation_summary["per_file"])
+
+                # Determine if any file used insurer format (vs all standard)
+                formats_used = {fi["format"] for fi in consolidation_summary["per_file"] if not fi.get("error")}
+                is_insurer_format = bool(formats_used - {"Standard"})
+
+                if is_insurer_format or len(census_files) > 1:
+                    st.success(
+                        f"Census consolidated: {file_count} file(s) → "
+                        f"**{total_active}** active members"
+                        + (f" ({total_inactive} inactive excluded)" if total_inactive > 0 else "")
+                    )
+
+                    # Show per-file breakdown
+                    with st.expander("Census consolidation details", expanded=False):
+                        for fi in consolidation_summary["per_file"]:
+                            err = fi.get("error")
+                            if err:
+                                st.error(f"**{fi['name']}**: Failed to read — {err}")
+                            else:
+                                st.markdown(
+                                    f"- **{fi['name']}** — Format: {fi['format']}, "
+                                    f"Active: {fi['active']}, Inactive excluded: {fi['inactive']}"
+                                )
+
+                # Map columns for analyze_census_file (expects RELATION, GENDER, Date Of Birth)
+                analysis_df = census_df.rename(columns={
+                    "Relation": "RELATION",
+                    "Gender": "GENDER",
+                    "DOB": "Date Of Birth",
+                })
+                census_analysis = analyze_census_file(analysis_df)
+
                 st.session_state["last_census_df"] = census_df
                 st.session_state["last_census_analysis"] = census_analysis
             except Exception as e:
-                st.error(f"Failed to read census file: {e}")
+                st.error(f"Failed to read census file(s): {e}")
 
         # ── DHA PDF Analysis ──
         if uploaded_file:
@@ -2179,7 +2753,7 @@ def page_new_quote():
                 st.session_state["last_census_df"] = df
                 return
 
-        elif census_file and census_analysis:
+        elif census_files and census_analysis:
             # Census-only mode (no DHA report)
             display_census_analysis(census_analysis)
             return
@@ -2197,12 +2771,19 @@ def page_new_quote():
             data = st.session_state["last_extract"]
             comms = st.session_state.get("last_commissions", commissions)
 
-            excel_bytes = generate_quote_excel(summary, data, comms)
+            excel_bytes = generate_quote_excel(
+                summary,
+                data,
+                comms,
+                prepared_by=st.session_state.get("prepared_by", ""),
+                broker_name=st.session_state.get("last_broker", ""),
+                rm_name=st.session_state.get("last_rm", ""),
+            )
 
             st.download_button(
                 label="📥 Download Full Quote Excel",
                 data=excel_bytes,
-                file_name=f"WellX_Quote_{summary.get('company_name', 'quote')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                file_name=f"Claims_Analysis_{summary.get('company_name', 'quote')}_{datetime.now().strftime('%Y%b%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
@@ -2909,11 +3490,18 @@ def page_extracted_info():
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            excel_bytes = generate_quote_excel(summary, analysis_data, commissions)
+            excel_bytes = generate_quote_excel(
+                summary,
+                analysis_data,
+                commissions,
+                prepared_by=st.session_state.get("prepared_by", ""),
+                broker_name=st.session_state.get("last_broker", ""),
+                rm_name=st.session_state.get("last_rm", ""),
+            )
             st.download_button(
                 label="📥 Download Full Quote Excel",
                 data=excel_bytes,
-                file_name=f"WellX_Quote_{company}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                file_name=f"Claims_Analysis_{company}_{datetime.now().strftime('%Y%b%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
