@@ -170,6 +170,7 @@ def _build_analysis_row(summary: dict, data: dict, census_analysis: Optional[dic
         "prepared_by":         context.get("prepared_by"),
         "plan":                pq.get("plan") or context.get("plan"),
         "status":              context.get("status", "neutral"),
+        "review_state":        "draft",
 
         "policy_effective_date": _iso_date(v.get("policy_effective_date")),
         "policy_expiry_date":    _iso_date(v.get("policy_expiry_date")),
@@ -314,6 +315,48 @@ def delete_analysis(analysis_id: str) -> bool:
     except Exception as e:
         st.warning(f"Supabase delete failed: {e}")
         return False
+
+
+# --- Approval workflow ----------------------------------------------------
+
+def save_analysis_edits(analysis_id: str, patch: dict, edited_by: str) -> bool:
+    """Apply an edit patch to an analysis. Stamps edited_by/at and moves the
+    row into 'under_review' (unless it's already in an explicit state the
+    caller wants to preserve — pass review_state in patch to override).
+    """
+    if not analysis_id:
+        return False
+    payload = dict(patch or {})
+    payload.setdefault("review_state", "under_review")
+    payload["edited_by"] = edited_by or None
+    payload["edited_at"] = datetime.utcnow().isoformat()
+    return update_analysis(analysis_id, payload)
+
+
+def approve_analysis(analysis_id: str, approver_name: str, note: str = "") -> bool:
+    """Stamp approved_by/at, set review_state='approved'. Locks the row
+    against further edits until un-approved."""
+    if not analysis_id or not approver_name:
+        return False
+    return update_analysis(analysis_id, {
+        "review_state":  "approved",
+        "approved_by":   approver_name,
+        "approved_at":   datetime.utcnow().isoformat(),
+        "approval_note": note or None,
+    })
+
+
+def unapprove_analysis(analysis_id: str) -> bool:
+    """Revert an approved analysis back to 'under_review' and clear the
+    approval stamp so it can be edited again."""
+    if not analysis_id:
+        return False
+    return update_analysis(analysis_id, {
+        "review_state":  "under_review",
+        "approved_by":   None,
+        "approved_at":   None,
+        "approval_note": None,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1501,8 @@ def generate_quote_excel(
     underwriter_name: str = "",
     uw_discount_pct: Optional[float] = None,
     major_claims_allowance: Optional[float] = None,
+    approved_by: Optional[str] = None,
+    approved_at: Optional[str] = None,
 ) -> bytes:
     """
     Build a 3-sheet workbook matching the Claims_Analysis_*.xlsx reference:
@@ -1470,6 +1515,10 @@ def generate_quote_excel(
     Values for uw_discount_pct / major_claims_allowance fall back to the
     Streamlit session state (form inputs) when not passed explicitly, so
     either call style works.
+
+    When approved_by + approved_at are provided, the workbook is stamped
+    with an "Approved by UW Manager" line in the Prospect-Info footer and
+    an "APPROVED ✓" badge in the Summary title.
     """
     # Resolve session-backed values if caller didn't supply them
     if uw_discount_pct is None:
@@ -1752,9 +1801,25 @@ def generate_quote_excel(
         f"Prepared by: {stamp_name} — on "
         f"{now.strftime('%d %b %Y')} {now.strftime('%I:%M %p').lstrip('0')}"
     )
-    footer = ws1[f"A{next_row + 1}"]
+    footer_row = next_row + 1
+    footer = ws1[f"A{footer_row}"]
     footer.value = prep_text
     footer.font = Font(name="Calibri", italic=True, size=11, color="5E788A")
+
+    # Approval stamp (added row below) when the analysis is approved
+    if approved_by and approved_at:
+        # approved_at may be an ISO timestamp string — format it tidily
+        try:
+            if isinstance(approved_at, str):
+                # strip microseconds/tz for display
+                clean = approved_at.replace("T", " ").split(".")[0].split("+")[0][:16]
+            else:
+                clean = approved_at.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            clean = str(approved_at)[:16]
+        approval_cell = ws1[f"A{footer_row + 1}"]
+        approval_cell.value = f"Approved by UW Manager: {approved_by} — on {clean}"
+        approval_cell.font = Font(name="Calibri", bold=True, italic=True, size=11, color="1A7F37")
 
     # =======================================================================
     # SHEET 2: BC & Premium Calculation
@@ -1946,6 +2011,14 @@ def generate_quote_excel(
     title3 = ws3["A1"]
     title3.value = "Executive Summary"
     title3.font = Font(name="Calibri", bold=True, size=14, color=XLS_NAVY)
+
+    # APPROVED badge in B1 when stamped
+    if approved_by and approved_at:
+        badge = ws3["B1"]
+        badge.value = f"APPROVED ✓ {approved_by}"
+        badge.font = Font(name="Calibri", bold=True, size=12, color="FFFFFF")
+        badge.fill = PatternFill(start_color="1A7F37", end_color="1A7F37", fill_type="solid")
+        badge.alignment = Alignment(horizontal="center", vertical="center")
 
     write_label(ws3, "A3", "Company Name")
     write_value(ws3, "B3", company_name)
@@ -3817,7 +3890,8 @@ def page_extracted_info():
 # ---------------------------------------------------------------------------
 
 def page_revisions():
-    """Load a previous quote, adjust inputs, and re-calculate."""
+    """Review & approve workflow: load a logged analysis, edit commissions +
+    monthly selections, save, and stamp UW Manager approval."""
     st.markdown("""
     <div style="background:#000; border-radius:14px; overflow:hidden; margin-bottom:28px;">
         <div style="height:3px; background:linear-gradient(90deg,#fb9b35,#f1517b,#b43082,#8431cb,#35c5fc);"></div>
@@ -3829,10 +3903,10 @@ def page_revisions():
                         margin-bottom:6px;">WellX</div>
             <div style="font-family:'Raleway',sans-serif; font-weight:800; font-size:1.3rem;
                         color:#fff; line-height:1.2; margin-bottom:4px;">
-                Revisions
+                Review &amp; Approve
                 <span style="display:block; font-size:0.85rem; font-weight:500;
                              color:rgba(255,255,255,0.45); font-family:'Inter',sans-serif; margin-top:4px;">
-                    Load a previous quote and adjust census, commissions, or benefits
+                    Load a logged analysis, adjust inputs, and stamp UW Manager approval
                 </span>
             </div>
         </div>
@@ -3844,14 +3918,28 @@ def page_revisions():
         st.info("No analyses logged yet. Run a new analysis first (requires Supabase credentials).")
         return
 
-    # Quote selector — use uuid as the id key
-    quote_options = {
-        f"{q['company_name']} — {q['created_at'][:10]} ({q['id'][:8]}…)": q["id"]
-        for q in quotes
-    }
-    selected_label = st.selectbox("Select a previous analysis to revise", list(quote_options.keys()))
-    selected_id = quote_options[selected_label]
+    # ── Review-state filter + selector ──
+    state_filter = st.selectbox(
+        "Review state",
+        ["All", "draft", "under_review", "approved", "changes_requested"],
+        index=0,
+    )
+    if state_filter != "All":
+        filtered = [q for q in quotes if (q.get("review_state") or "draft") == state_filter]
+    else:
+        filtered = quotes
+    if not filtered:
+        st.info(f"No analyses in '{state_filter}' state.")
+        return
 
+    _state_badge = {"draft": "📝", "under_review": "🟠", "approved": "✅", "changes_requested": "🔴"}
+    quote_options = {
+        f"{_state_badge.get(q.get('review_state') or 'draft', '📝')} "
+        f"{q['company_name']} — {q['created_at'][:10]} ({q['id'][:8]}…)": q["id"]
+        for q in filtered
+    }
+    selected_label = st.selectbox("Select a logged analysis", list(quote_options.keys()))
+    selected_id = quote_options[selected_label]
     quote = get_analysis(selected_id)
     if not quote:
         st.error("Analysis not found.")
@@ -3859,92 +3947,364 @@ def page_revisions():
 
     stored_summary = quote.get("summary") or {}
     stored_extract = quote.get("raw_extract") or {}
+    raw_monthly = (stored_extract.get("monthly_claims")
+                   or quote.get("monthly_claims") or [])
+    review_state = quote.get("review_state") or "draft"
+    is_approved = review_state == "approved"
+
+    # ── Status banner ──
+    if is_approved:
+        approved_at = (quote.get("approved_at") or "")[:19].replace("T", " ")
+        st.markdown(
+            f'<div class="badge-ok" style="padding:12px 18px; font-size:1rem;">'
+            f'✅ <strong>Approved</strong> by UW Manager '
+            f'<strong>{quote.get("approved_by") or "?"}</strong> on {approved_at}'
+            + (f'<br><em style="font-size:0.85rem;">Note: {quote["approval_note"]}</em>'
+               if quote.get("approval_note") else "")
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+    elif review_state == "under_review":
+        edited_at = (quote.get("edited_at") or "")[:19].replace("T", " ")
+        st.markdown(
+            f'<div class="badge-warn">🟠 <strong>Under review</strong> — last edited by '
+            f'{quote.get("edited_by") or "?"} on {edited_at}</div>',
+            unsafe_allow_html=True,
+        )
+    elif review_state == "changes_requested":
+        st.markdown('<div class="badge-fail">🔴 <strong>Changes requested</strong></div>',
+                    unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="info-box">📝 <strong>Draft</strong> — auto-logged on analysis run.</div>',
+                    unsafe_allow_html=True)
 
     st.markdown(
         f"**Company:** {quote['company_name']}  |  "
         f"**Broker:** {quote.get('broker_name') or 'N/A'}  |  "
-        f"**Status:** {quote.get('status') or 'neutral'}"
+        f"**RM:** {quote.get('relationship_manager') or 'N/A'}  |  "
+        f"**Plan:** {quote.get('plan') or 'N/A'}  |  "
+        f"**Prepared by:** {quote.get('underwriter') or quote.get('prepared_by') or 'N/A'}"
     )
     st.markdown("---")
 
-    # Revision inputs
-    st.markdown('<div class="section-lbl">Adjust Parameters</div>', unsafe_allow_html=True)
-
-    pq_default = (stored_summary.get("premium_quotation") or {}).get("current_census", 0)
-    col1, col2 = st.columns(2)
-    with col1:
-        new_census = st.number_input(
-            "Updated Current Census",
-            value=int(quote.get("uploaded_census_count") or pq_default or 1),
-            min_value=1,
-            step=1,
-        )
-    with col2:
-        manual_adjustment_pct = st.number_input(
-            "Manual Loading / Discount (%)",
-            value=0.0,
-            min_value=-50.0,
-            max_value=100.0,
-            step=1.0,
-            help="Positive = loading, Negative = discount. Applied to net premium.",
-        )
+    # ── Edit form (disabled when approved) ──
+    if is_approved:
+        st.info("This analysis is locked. Click **Un-approve** below to edit it.")
 
     st.markdown('<div class="section-lbl">Commissions</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        rev_broker = st.number_input("Broker ", value=float(quote.get("commission_broker") or 10), step=0.5, key="rev_b")
+        rev_broker = st.number_input("Broker %", value=float(quote.get("commission_broker") or 10),
+                                      step=0.5, key=f"rev_b_{selected_id}", disabled=is_approved)
     with c2:
-        rev_insurer = st.number_input("Insurer ", value=float(quote.get("commission_insurer") or 0.5), step=0.1, key="rev_i")
+        rev_insurer = st.number_input("Insurer %", value=float(quote.get("commission_insurer") or 0.5),
+                                       step=0.1, key=f"rev_i_{selected_id}", disabled=is_approved)
     with c3:
-        rev_nas = st.number_input("NAS ", value=float(quote.get("commission_nas") or 4), step=0.5, key="rev_t")
+        rev_nas = st.number_input("NAS %", value=float(quote.get("commission_nas") or 4),
+                                   step=0.5, key=f"rev_n_{selected_id}", disabled=is_approved)
     with c4:
-        rev_platform = st.number_input("Platform ", value=float(quote.get("commission_platform") or 4), step=0.5, key="rev_w")
+        rev_platform = st.number_input("Platform %", value=float(quote.get("commission_platform") or 4),
+                                        step=0.5, key=f"rev_p_{selected_id}", disabled=is_approved)
     with c5:
-        rev_margins = st.number_input("RI Margin ", value=float(quote.get("commission_ri_margin") or 7), step=0.5, key="rev_m")
+        rev_margins = st.number_input("RI Margin %", value=float(quote.get("commission_ri_margin") or 7),
+                                       step=0.5, key=f"rev_m_{selected_id}", disabled=is_approved)
 
-    if st.button("📊 Recalculate Premium", type="primary", use_container_width=True):
-        burning_cost = float(quote.get("adjusted_burning_cost_per_capita") or 0)
+    st.markdown('<div class="section-lbl">Adjustments</div>', unsafe_allow_html=True)
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        rev_haircut = st.number_input(
+            "Over Reporting Haircut %",
+            value=float(quote.get("uw_discount_pct") or 0),
+            min_value=0.0, max_value=100.0, step=0.5,
+            help="Accounts for over-reporting of claims by some insurers. Subject to UW discretion and reinsurer approval.",
+            key=f"rev_haircut_{selected_id}", disabled=is_approved,
+        )
+    with a2:
+        rev_major = st.number_input(
+            "Major Claims Allowance (AED)",
+            value=float(quote.get("major_claims_allowance") or 0),
+            min_value=0.0, step=1000.0,
+            key=f"rev_major_{selected_id}", disabled=is_approved,
+        )
+    with a3:
+        rev_loading = st.number_input(
+            "UW Loading %",
+            value=float(quote.get("uw_loading_pct") or 0),
+            min_value=0.0, max_value=100.0, step=0.5,
+            key=f"rev_loading_{selected_id}", disabled=is_approved,
+        )
 
-        # Recalculate
-        projected_claims = burning_cost * 12 * new_census
+    s1, s2 = st.columns([1, 2])
+    with s1:
+        status_options = ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"]
+        current_status = quote.get("status") or "neutral"
+        rev_status = st.selectbox(
+            "Quote Status", status_options,
+            index=status_options.index(current_status) if current_status in status_options else 0,
+            key=f"rev_status_{selected_id}", disabled=is_approved,
+        )
+    with s2:
+        rev_notes = st.text_area(
+            "Notes", value=quote.get("notes") or "",
+            key=f"rev_notes_{selected_id}", disabled=is_approved,
+            placeholder="Any internal notes — reasoning, broker context, follow-ups…",
+        )
 
-        # Apply manual adjustment
-        net_premium = projected_claims * (1 + manual_adjustment_pct / 100)
+    # ── Monthly selections ──
+    st.markdown('<div class="section-lbl">Monthly Claims — selections & haircuts</div>',
+                unsafe_allow_html=True)
+    st.caption("Uncheck months to exclude from the burning-cost average. Enter haircut amounts to reduce a month's value.")
 
-        total_comm = (rev_broker + rev_insurer + rev_nas + rev_platform + rev_margins) / 100
+    # Use the stored per-month inclusion / haircut arrays if available,
+    # else default to all included / 0 haircut.
+    included_default = (stored_summary.get("burning_cost_analysis") or {}).get("monthly_included_flags", [])
+    if not included_default or len(included_default) != len(raw_monthly):
+        included_default = [True] * len(raw_monthly)
 
-        if total_comm < 1:
-            new_premium = net_premium / (1 - total_comm)
-        else:
-            new_premium = net_premium
-            st.warning("Total commissions >= 100%!")
+    new_included: list = []
+    new_haircuts: list = []
+    for i, m in enumerate(raw_monthly):
+        label = f"{m.get('month','')} {m.get('year','')}".strip()
+        val = float(m.get("value", 0) or 0)
+        mc1, mc2, mc3 = st.columns([1, 2, 2])
+        with mc1:
+            inc = st.checkbox(
+                "Incl.", value=bool(included_default[i]) if i < len(included_default) else True,
+                key=f"rev_inc_{selected_id}_{i}", disabled=is_approved,
+            )
+        with mc2:
+            st.markdown(f"**{label}** — AED {val:,.0f}")
+        with mc3:
+            hc = st.number_input(
+                "Haircut (AED)", value=0.0, min_value=0.0, max_value=val, step=1000.0,
+                key=f"rev_hc_{selected_id}_{i}", disabled=is_approved, label_visibility="collapsed",
+            )
+        new_included.append(inc)
+        new_haircuts.append(hc)
 
-        st.markdown('<div class="section-lbl">Revised Results</div>', unsafe_allow_html=True)
+    # ── Action buttons ──
+    st.markdown("---")
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            render_metric("Burning Cost Per Capita", burning_cost)
-        with col2:
-            render_metric("New Census", new_census, currency=False)
-        with col3:
-            render_metric("Projected Claims", projected_claims)
-        with col4:
-            st.markdown(f"""
-            <div class="premium-hero">
-                <div class="ph-label">Revised Premium</div>
-                <div class="ph-value">AED {new_premium:,.2f}</div>
-                <div class="ph-sub">Per member/year: AED {new_premium / new_census:,.2f}</div>
-                <div class="ph-sub">Per member/month: AED {new_premium / new_census / 12:,.2f}</div>
-            </div>
-            """, unsafe_allow_html=True)
+    if is_approved:
+        st.markdown('<div class="section-lbl">Approval Actions</div>', unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("🔓 Un-approve to edit", use_container_width=True, key=f"unapprove_{selected_id}"):
+                if unapprove_analysis(selected_id):
+                    st.success("Analysis un-approved — you can now edit it.")
+                    st.rerun()
+        with b2:
+            # Download the current Excel (reflecting approved state)
+            _render_download_button(quote, key_suffix=f"_approved_{selected_id}")
+    else:
+        # Rebuild current commission dict for the save + Excel render
+        plan = quote.get("plan") or ""
+        rebuilt_commissions = _rebuild_commissions(
+            plan, rev_broker, rev_insurer, rev_platform, rev_nas, rev_margins,
+            ri_broker=float(quote.get("commission_ri_broker") or 0),
+            insurance_tax=float(quote.get("commission_insurance_tax") or 0),
+        )
 
-        # Comparison with original
-        original_premium = float(quote.get("indicative_premium", 0) or 0)
-        if original_premium > 0:
-            diff = new_premium - original_premium
-            diff_pct = (diff / original_premium) * 100
-            badge = "badge-ok" if diff <= 0 else "badge-warn"
-            st.markdown(f'<div class="{badge}">Change from original: AED {diff:+,.2f} ({diff_pct:+.1f}%)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-lbl">Approval</div>', unsafe_allow_html=True)
+        ap1, ap2 = st.columns([1, 2])
+        with ap1:
+            uw_options = list_underwriters() or ["Angela", "Ignatius", "Jasper", "Joseph", "Mabel"]
+            default_approver = st.session_state.get("last_underwriter") or "Jasper"
+            idx = uw_options.index(default_approver) if default_approver in uw_options else 0
+            approver_name = st.selectbox("Approve as UW Manager", uw_options, index=idx,
+                                          key=f"approver_{selected_id}")
+        with ap2:
+            approval_note = st.text_input("Approval note (optional)",
+                                           key=f"approval_note_{selected_id}",
+                                           placeholder="e.g. Approved with reinsurer concurrence on haircut")
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            save_clicked = st.button("💾 Save Edits", use_container_width=True,
+                                       key=f"save_{selected_id}")
+        with b2:
+            approve_clicked = st.button("✅ Save & Approve", type="primary",
+                                          use_container_width=True, key=f"approve_{selected_id}")
+        with b3:
+            changes_clicked = st.button("🔴 Request Changes", use_container_width=True,
+                                          key=f"changes_{selected_id}")
+
+        if save_clicked or approve_clicked or changes_clicked:
+            # Build patch
+            try:
+                patch = _build_edit_patch(
+                    quote,
+                    rebuilt_commissions,
+                    rev_broker, rev_insurer, rev_platform, rev_nas, rev_margins,
+                    rev_haircut, rev_major, rev_loading,
+                    rev_status, rev_notes,
+                    raw_monthly, new_included, new_haircuts,
+                )
+            except Exception as e:
+                st.error(f"Failed to recalculate: {e}")
+                patch = None
+
+            if patch is not None:
+                editor = st.session_state.get("last_underwriter") or approver_name
+                if approve_clicked:
+                    patch["review_state"] = "approved"
+                    patch["approved_by"] = approver_name
+                    patch["approved_at"] = datetime.utcnow().isoformat()
+                    patch["approval_note"] = approval_note or None
+                elif changes_clicked:
+                    patch["review_state"] = "changes_requested"
+
+                if save_analysis_edits(selected_id, patch, edited_by=editor):
+                    if approve_clicked:
+                        st.success(f"Approved by UW Manager {approver_name}.")
+                    elif changes_clicked:
+                        st.success("Marked as 'changes requested'.")
+                    else:
+                        st.success("Edits saved.")
+                    st.rerun()
+
+        # Download button below (reflects any unsaved edits? No — reflects saved state)
+        st.markdown("---")
+        _render_download_button(quote, key_suffix=f"_unapproved_{selected_id}")
+
+
+def _rebuild_commissions(plan: str, broker: float, insurer: float, platform: float,
+                         nas: float, ri_margin: float,
+                         ri_broker: float = 0, insurance_tax: float = 0) -> dict:
+    """Reconstruct the commissions dict in the exact shape run_sop_analysis expects,
+    based on the plan variant."""
+    is_openx = bool(plan) and "OpenX" in plan
+    comms: dict = {"Broker": broker, "NAS": nas, "Reinsurance Margin": ri_margin}
+    if is_openx:
+        comms.update({"OpenX": platform, "DNI": insurer,
+                      "RI Broker": ri_broker, "Insurance Tax": insurance_tax})
+    else:
+        comms.update({"HealthX": platform, "QIC": insurer, "Insurance Tax": insurance_tax})
+    return comms
+
+
+def _build_edit_patch(quote: dict, commissions: dict,
+                      broker: float, insurer: float, platform: float,
+                      nas: float, ri_margin: float,
+                      haircut_pct: float, major_allowance: float, uw_loading: float,
+                      status: str, notes: str,
+                      raw_monthly: list, included: list, haircuts: list) -> dict:
+    """Re-run the SOP analysis with new inputs and build a patch to UPDATE
+    the existing analyses row. Returns the patch dict."""
+    # Build modified monthly_claims (zero excluded months; subtract haircuts)
+    final_monthly: list = []
+    for i, m in enumerate(raw_monthly):
+        val = float(m.get("value", 0) or 0)
+        inc = bool(included[i]) if i < len(included) else True
+        hc = float(haircuts[i]) if i < len(haircuts) else 0.0
+        net = max(val - hc, 0) if inc else 0
+        final_monthly.append({"month": m.get("month"), "year": m.get("year"), "value": net})
+
+    # Prepare data for run_sop_analysis
+    data = copy.deepcopy(quote.get("raw_extract") or {})
+    data["monthly_claims"] = final_monthly
+
+    company = quote.get("company_name") or ""
+    plan = quote.get("plan") or "HealthX-QIC"
+    uploaded_count = int(quote.get("uploaded_census_count") or 0)
+
+    summary = run_sop_analysis(data, commissions, company, plan, uploaded_count)
+
+    # Assemble the patch using _build_analysis_row, then strip immutable fields
+    ca = summary.get("claims_analysis", {}) or {}
+    bc = summary.get("burning_cost_analysis", {}) or {}
+    pq = summary.get("premium_quotation", {}) or {}
+    totals = ((data.get("claims_by_member_type") or {}).get("totals")) or {}
+
+    return {
+        "summary": summary,
+        "flags":   summary.get("flags") or [],
+        "monthly_claims": final_monthly,
+        "complex_cases": (summary.get("diagnosis_analysis") or {}).get("flagged_conditions") or [],
+
+        # Promoted scalar columns
+        "claims_paid":           _num(ca.get("claims_paid")),
+        "claims_outstanding":    _num(ca.get("claims_outstanding")),
+        "claims_ibnr":           _num(ca.get("claims_ibnr")),
+        "total_incurred":        _num(ca.get("total_incurred")),
+        "outstanding_ratio_pct": _num(ca.get("outstanding_ratio_pct")),
+        "ip_ratio_pct":          _num(ca.get("ip_ratio_pct")),
+        "claims_ip":       _num(totals.get("ip")),
+        "claims_op":       _num(totals.get("op")),
+        "claims_pharmacy": _num(totals.get("pharmacy")),
+        "claims_dental":   _num(totals.get("dental")),
+        "claims_optical":  _num(totals.get("optical")),
+
+        "highest_avg_monthly":              _num(bc.get("highest_avg_monthly")),
+        "burning_cost_per_capita":          _num(bc.get("burning_cost_per_capita")),
+        "adjusted_burning_cost_per_capita": _num(bc.get("adjusted_burning_cost_per_capita")),
+        "inflation_pct":                    _num(bc.get("inflation_pct")),
+        "ip_adjustment_pct":                _num(bc.get("ip_adjustment_pct")),
+        "outstanding_adjustment_pct":       _num(bc.get("outstanding_adjustment_pct")),
+
+        "projected_claims_annual":    _num(pq.get("projected_claims_annual")),
+        "net_premium":                _num(pq.get("net_premium")),
+        "total_commission_pct":       _num(pq.get("total_commission_pct")),
+        "indicative_premium":         _num(pq.get("indicative_premium")),
+        "premium_per_member_annual":  _num(pq.get("premium_per_member_annual")),
+        "premium_per_member_monthly": _num(pq.get("premium_per_member_monthly")),
+
+        "commission_broker":        _num(broker),
+        "commission_platform":      _num(platform),
+        "commission_insurer":       _num(insurer),
+        "commission_nas":           _num(nas),
+        "commission_ri_margin":     _num(ri_margin),
+
+        "uw_discount_pct":        _num(haircut_pct),
+        "major_claims_allowance": _num(major_allowance),
+        "uw_loading_pct":         _num(uw_loading),
+
+        "status": status,
+        "notes":  notes or None,
+    }
+
+
+def _render_download_button(quote: dict, key_suffix: str = ""):
+    """Render a Download Full Quote Excel button that reflects the current
+    state of the given analysis row (including approval stamp, if any)."""
+    data_for_excel = dict(quote.get("raw_extract") or {})
+    # Ensure monthly_claims reflects the stored (possibly edited) version
+    data_for_excel["monthly_claims"] = quote.get("monthly_claims") or data_for_excel.get("monthly_claims") or []
+    commissions = _rebuild_commissions(
+        quote.get("plan") or "",
+        float(quote.get("commission_broker") or 0),
+        float(quote.get("commission_insurer") or 0),
+        float(quote.get("commission_platform") or 0),
+        float(quote.get("commission_nas") or 0),
+        float(quote.get("commission_ri_margin") or 0),
+        ri_broker=float(quote.get("commission_ri_broker") or 0),
+        insurance_tax=float(quote.get("commission_insurance_tax") or 0),
+    )
+    try:
+        xls = generate_quote_excel(
+            quote.get("summary") or {},
+            data_for_excel,
+            commissions,
+            prepared_by=quote.get("prepared_by") or "",
+            broker_name=quote.get("broker_name") or "",
+            rm_name=quote.get("relationship_manager") or "",
+            underwriter_name=quote.get("underwriter") or "",
+            uw_discount_pct=float(quote.get("uw_discount_pct") or 0),
+            major_claims_allowance=float(quote.get("major_claims_allowance") or 0),
+            approved_by=quote.get("approved_by"),
+            approved_at=quote.get("approved_at"),
+        )
+    except Exception as e:
+        st.error(f"Failed to build Excel: {e}")
+        return
+    st.download_button(
+        label="📥 Download Full Quote Excel",
+        data=xls,
+        file_name=f"Claims_Analysis_{quote.get('company_name','quote')}_{datetime.now().strftime('%Y%b%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key=f"dl{key_suffix}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4010,10 +4370,21 @@ def page_dashboard():
         pq_census = (stored_summary.get("premium_quotation") or {}).get("current_census", 0)
         census = int(q.get("uploaded_census_count") or pq_census or 0)
 
+        # Review-state indicator (approval / under-review / draft)
+        rs = q.get("review_state") or "draft"
+        review_badge = {
+            "approved":           "✅ Approved",
+            "under_review":       "🟠 Under review",
+            "changes_requested":  "🔴 Changes requested",
+            "draft":              "📝 Draft",
+        }.get(rs, "📝 Draft")
+        if rs == "approved" and q.get("approved_by"):
+            review_badge = f"✅ Approved by {q['approved_by']}"
+
         with st.expander(
             f"{badge} {short_id}… — **{q['company_name']}** | "
             f"Premium: AED {premium:,.0f} | Census: {census} | "
-            f"{q['created_at'][:10]}"
+            f"{review_badge} | {q['created_at'][:10]}"
         ):
             col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
