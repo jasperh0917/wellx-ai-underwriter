@@ -317,6 +317,38 @@ def delete_analysis(analysis_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SHARED LOOKUP TABLES — canonical broker / underwriter / RM lists
+# (also used by the sibling policy-binding app in the same Supabase project)
+# ---------------------------------------------------------------------------
+
+def _list_lookup(table: str) -> list:
+    """Return active `name` values from a simple lookup table, or [] on failure."""
+    sb = get_supabase()
+    if sb is None:
+        return []
+    try:
+        res = sb.table(table).select("name").eq("active", True).order("name").execute()
+        return [r["name"] for r in (res.data or []) if r.get("name")]
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def list_brokers() -> list:
+    return _list_lookup("brokers")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def list_underwriters() -> list:
+    return _list_lookup("underwriters")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def list_rms() -> list:
+    return _list_lookup("rm_persons")
+
+
+# ---------------------------------------------------------------------------
 # CLAUDE VISION EXTRACTION — the core AI parsing engine
 # ---------------------------------------------------------------------------
 
@@ -2660,20 +2692,45 @@ def page_new_quote():
         )
 
     # ── Company, Broker & Plan ──
+    # Broker / Underwriter / RM dropdowns read from the shared Supabase lookup
+    # tables so this app and the sibling policy-binding app stay in sync.
+    # Fallbacks cover local dev without Supabase credentials.
+    _FALLBACK_UW = ["Angela", "Ignatius", "Jasper", "Joseph", "Mabel"]
+    _FALLBACK_RM = ["Heston", "Hishaam", "Mark", "Sujith"]
+
     st.markdown('<div class="section-lbl">Client &amp; Broker</div>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     with col1:
         company_name = st.text_input("Company / Employer Name", placeholder="e.g. United Bank Limited")
     with col2:
-        broker_name = st.text_input("Broker Name", placeholder="e.g. Marsh McLennan")
+        broker_list = list_brokers()
+        broker_options = (broker_list + ["Other…"]) if broker_list else ["Other…"]
+        broker_choice = st.selectbox(
+            "Broker",
+            broker_options,
+            help=(
+                f"{len(broker_list)} brokers from Supabase"
+                if broker_list else
+                "Supabase unreachable — enter broker name manually"
+            ),
+        )
+        if broker_choice == "Other…":
+            broker_name = st.text_input(
+                "Broker name (not in list)",
+                placeholder="e.g. New Broker LLC",
+            )
+        else:
+            broker_name = broker_choice
     with col3:
         plan = st.selectbox("Plan", PLAN_OPTIONS, index=0)
 
     col4, col5 = st.columns(2)
     with col4:
-        underwriter = st.selectbox("Underwriter", ["Jasper", "Mabel", "Joseph", "Angela"])
+        uw_options = list_underwriters() or _FALLBACK_UW
+        underwriter = st.selectbox("Underwriter", uw_options)
     with col5:
-        rm_person = st.selectbox("RM", ["Heston", "Mark", "Sujith"])
+        rm_options = list_rms() or _FALLBACK_RM
+        rm_person = st.selectbox("RM", rm_options)
 
     # ── Dynamic Commissions based on selected plan ──
     st.markdown('<div class="section-lbl">Commissions &amp; Margins</div>', unsafe_allow_html=True)
