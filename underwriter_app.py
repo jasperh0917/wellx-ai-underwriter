@@ -548,6 +548,195 @@ Do NOT include any text outside the JSON object. Do NOT wrap in markdown code fe
 Return ONLY the raw JSON."""
 
 
+# ---------------------------------------------------------------------------
+# COMBINING MULTIPLE DHA EXTRACTS — for same prospect, consecutive periods
+# ---------------------------------------------------------------------------
+
+def _earliest_date(candidates: list) -> str:
+    """Return the earliest parseable date string, or the first non-empty, or ''."""
+    parsed = []
+    for c in candidates:
+        if not c:
+            continue
+        dt = parse_date_flexible(c) if "parse_date_flexible" in globals() else None
+        if dt:
+            parsed.append((dt, c))
+    if parsed:
+        parsed.sort(key=lambda x: x[0])
+        return parsed[0][1]
+    return next((c for c in candidates if c), "")
+
+
+def _latest_date(candidates: list) -> str:
+    """Return the latest parseable date string, or the last non-empty, or ''."""
+    parsed = []
+    for c in candidates:
+        if not c:
+            continue
+        dt = parse_date_flexible(c) if "parse_date_flexible" in globals() else None
+        if dt:
+            parsed.append((dt, c))
+    if parsed:
+        parsed.sort(key=lambda x: x[0], reverse=True)
+        return parsed[0][1]
+    return next((c for c in reversed(candidates) if c), "")
+
+
+def _sum_claims_by_type(extracts: list) -> dict:
+    """Sum claims_by_member_type.totals and row breakdowns across extracts."""
+    combined: dict = {"totals": {}}
+    # Preserve all category keys seen across any extract
+    all_cats: set = set()
+    all_rows: set = set()  # employee / spouse / dependents
+    for e in extracts:
+        cbmt = e.get("claims_by_member_type") or {}
+        totals = cbmt.get("totals") or {}
+        for k in totals.keys():
+            all_cats.add(k)
+        for k in cbmt.keys():
+            if k != "totals":
+                all_rows.add(k)
+
+    for cat in all_cats:
+        combined["totals"][cat] = sum(
+            float(((e.get("claims_by_member_type") or {}).get("totals") or {}).get(cat, 0) or 0)
+            for e in extracts
+        )
+    for row in all_rows:
+        combined[row] = {}
+        for cat in all_cats:
+            combined[row][cat] = sum(
+                float(((e.get("claims_by_member_type") or {}).get(row) or {}).get(cat, 0) or 0)
+                for e in extracts
+            )
+    return combined
+
+
+def _merge_top10(extracts: list, list_key: str, name_key: str) -> list:
+    """Concat the top-10 lists from each extract, group by normalised name,
+    sum ip/op/total, re-rank, keep top 10."""
+    buckets: dict = {}
+    for e in extracts:
+        for item in (e.get(list_key) or []):
+            raw = item.get(name_key) or ""
+            norm = raw.strip().lower()
+            if not norm:
+                continue
+            b = buckets.setdefault(norm, {name_key: raw, "ip": 0.0, "op": 0.0, "total": 0.0})
+            b["ip"]    += float(item.get("ip", 0) or 0)
+            b["op"]    += float(item.get("op", 0) or 0)
+            b["total"] += float(item.get("total", 0) or 0)
+    merged = list(buckets.values())
+    merged.sort(key=lambda x: x.get("total", 0), reverse=True)
+    return merged[:10]
+
+
+def combine_dha_extracts(extracts: list, sources: list) -> tuple:
+    """Combine N DHA extracts (same prospect, consecutive periods) into one
+    unified dict. Returns (combined_dict, warning_flags).
+
+    sources: list of human labels (usually PDF filenames) — same length as extracts.
+    """
+    if len(extracts) <= 1:
+        return (extracts[0] if extracts else {}, [])
+
+    flags: list = []
+    combined: dict = {}
+
+    # ── Identity / metadata ──
+    combined["employer_name"] = next((e.get("employer_name") for e in extracts if e.get("employer_name")), "")
+
+    # ── Dates ──
+    combined["policy_effective_date"] = _earliest_date([e.get("policy_effective_date") for e in extracts])
+    combined["policy_expiry_date"]    = _latest_date  ([e.get("policy_expiry_date")    for e in extracts])
+    combined["report_period_start"]   = _earliest_date([e.get("report_period_start")   for e in extracts])
+    combined["report_period_end"]     = _latest_date  ([e.get("report_period_end")     for e in extracts])
+    combined["report_production_date"] = _latest_date([e.get("report_production_date") for e in extracts])
+    combined["initial_policy_effective_date"] = _earliest_date(
+        [e.get("initial_policy_effective_date") for e in extracts]
+    )
+
+    # ── Claims (additive) ──
+    combined["claims_paid"]        = sum(float(e.get("claims_paid", 0) or 0)        for e in extracts)
+    combined["claims_outstanding"] = sum(float(e.get("claims_outstanding", 0) or 0) for e in extracts)
+    combined["claims_ibnr"]        = sum(float(e.get("claims_ibnr", 0) or 0)        for e in extracts)
+
+    # ── Census: take start from the earliest report, end from the latest ──
+    period_starts = [(parse_date_flexible(e.get("report_period_start", "")), i) for i, e in enumerate(extracts)]
+    period_ends   = [(parse_date_flexible(e.get("report_period_end", "")),   i) for i, e in enumerate(extracts)]
+    period_starts = [p for p in period_starts if p[0]]
+    period_ends   = [p for p in period_ends   if p[0]]
+    if period_starts:
+        earliest_idx = min(period_starts, key=lambda x: x[0])[1]
+        combined["census_start"] = extracts[earliest_idx].get("census_start", {})
+    else:
+        combined["census_start"] = extracts[0].get("census_start", {})
+    if period_ends:
+        latest_idx = max(period_ends, key=lambda x: x[0])[1]
+        combined["census_end"] = extracts[latest_idx].get("census_end", {})
+    else:
+        combined["census_end"] = extracts[-1].get("census_end", {})
+
+    # ── Claims by member type (sum per category + per row) ──
+    combined["claims_by_member_type"] = _sum_claims_by_type(extracts)
+
+    # ── Top 10 diagnoses / providers (merged + re-ranked) ──
+    combined["diagnosis_top10_values"] = _merge_top10(extracts, "diagnosis_top10_values", "diagnosis")
+    combined["diagnosis_top10_counts"] = _merge_top10(extracts, "diagnosis_top10_counts", "diagnosis")
+    combined["provider_top10_values"]  = _merge_top10(extracts, "provider_top10_values",  "provider")
+    combined["provider_top10_counts"]  = _merge_top10(extracts, "provider_top10_counts",  "provider")
+
+    # ── Monthly claims: concat, tag with source, detect overlaps ──
+    all_months: list = []
+    seen_keys: dict = {}
+    overlap_labels: list = []
+    for ex_idx, e in enumerate(extracts):
+        src_label = sources[ex_idx] if ex_idx < len(sources) else f"Report {ex_idx + 1}"
+        for m in (e.get("monthly_claims") or []):
+            entry = dict(m)
+            entry["source"] = src_label
+            key = (str(entry.get("month", "")).lower().strip(), entry.get("year"))
+            if key in seen_keys:
+                seen_keys[key].append(len(all_months))
+                label = f"{entry.get('month','')} {entry.get('year','')}".strip()
+                if label not in overlap_labels:
+                    overlap_labels.append(label)
+            else:
+                seen_keys[key] = [len(all_months)]
+            all_months.append(entry)
+    combined["monthly_claims"] = all_months
+
+    if overlap_labels:
+        flags.append(
+            f"OVERLAPPING MONTHS across reports: {', '.join(overlap_labels)} — "
+            "each duplicate was defaulted to EXCLUDED on the Extracted Information "
+            "page; pick one to include per month."
+        )
+
+    # ── Complex cases notes: concatenate ──
+    notes = [e.get("complex_cases_notes", "") for e in extracts if e.get("complex_cases_notes")]
+    combined["complex_cases_notes"] = "\n\n".join(notes)
+
+    # ── Carry-over flags ──
+    combined["non_standard_format"] = any(e.get("non_standard_format") for e in extracts)
+    combined["extraction_notes"] = " | ".join(
+        f"[{sources[i] if i < len(sources) else f'Report {i+1}'}] {n}"
+        for i, e in enumerate(extracts)
+        for n in [e.get("extraction_notes", "")] if n
+    )
+
+    # Also return a per-report summary flag so the underwriter sees what fed the combine
+    flags.insert(0,
+        f"COMBINED FROM {len(extracts)} REPORTS: "
+        + "; ".join(sources[:len(extracts)])
+    )
+
+    # Map overlap positions so the caller can auto-exclude duplicates
+    combined["_overlap_indices"] = [idx for idxs in seen_keys.values() if len(idxs) > 1 for idx in idxs]
+
+    return combined, flags
+
+
 def extract_dha_report_with_claude(api_key: str, pdf_bytes: bytes) -> dict:
     """
     Convert PDF pages to images, send to Claude Vision, and extract structured data.
@@ -1790,7 +1979,8 @@ def generate_quote_excel(
         r = 43 + i
         if i < len(raw_monthly):
             m = raw_monthly[i]
-            month_lbl = f"{m.get('month', '')} {m.get('year', '')}".strip()
+            src_tag = f" ({m['source']})" if m.get("source") else ""
+            month_lbl = f"{m.get('month', '')} {m.get('year', '')}{src_tag}".strip()
             write_label(ws1, f"A{r}", month_lbl)
             write_value(
                 ws1, f"B{r}",
@@ -1881,7 +2071,8 @@ def generate_quote_excel(
         r = 2 + i
         if i < len(raw_monthly):
             m = raw_monthly[i]
-            ws2.cell(row=r, column=1, value=f"{m.get('month', '')} {m.get('year', '')}".strip())
+            src_tag = f" ({m['source']})" if m.get("source") else ""
+            ws2.cell(row=r, column=1, value=f"{m.get('month', '')} {m.get('year', '')}{src_tag}".strip())
             ws2.cell(row=r, column=2, value=float(m.get("value", 0) or 0)).number_format = XLS_CURRENCY_FMT
             ws2.cell(row=r, column=3, value=0).number_format = XLS_CURRENCY_FMT
             # Default selected state: use session flag if available, else first/last excluded
@@ -2852,12 +3043,19 @@ def page_new_quote():
     st.markdown('<div class="section-lbl">Upload Files</div>', unsafe_allow_html=True)
     col_up1, col_up2 = st.columns(2)
     with col_up1:
-        uploaded_file = st.file_uploader(
-            "DHA Report (PDF) or Claims Data",
+        uploaded_files = st.file_uploader(
+            "DHA Report(s) (PDF) or Claims Data",
             type=["pdf", "xlsx", "xls", "csv"],
-            help="PDF: Analyzed by Jasper AI.  Excel/CSV: Line-by-line claims data.",
+            accept_multiple_files=True,
+            help=(
+                "PDF: Analyzed by Jasper AI. Upload multiple PDFs to combine "
+                "consecutive periods for the same prospect. Excel/CSV: line-by-line claims data."
+            ),
             key="dha_upload",
         )
+        # Back-compat: keep a single `uploaded_file` reference for the legacy
+        # xlsx/csv branch below, which only supports one file.
+        uploaded_file = uploaded_files[0] if uploaded_files else None
     with col_up2:
         census_files = st.file_uploader(
             "Census File(s) (Excel/CSV)",
@@ -3010,16 +3208,65 @@ def page_new_quote():
                 st.error(f"Failed to read census file(s): {e}")
 
         # ── DHA PDF Analysis ──
-        if uploaded_file:
-            file_ext = uploaded_file.name.split(".")[-1].lower()
+        if uploaded_files:
+            pdf_files = [f for f in uploaded_files if f.name.lower().endswith(".pdf")]
+            other_files = [f for f in uploaded_files if not f.name.lower().endswith(".pdf")]
 
-            if file_ext == "pdf":
-                pdf_bytes = uploaded_file.read()
-                data = extract_dha_report_with_claude(api_key, pdf_bytes)
+            if len(other_files) > 1:
+                st.error("Only one Excel/CSV file can be analysed at a time.")
+                return
 
-                if not data:
-                    return
+            combine_flags: list = []
 
+            if pdf_files:
+                # Extract each PDF independently, then combine for same-prospect
+                # consecutive-period runs.
+                extracts: list = []
+                sources: list = []
+                for idx, f in enumerate(pdf_files, start=1):
+                    st.info(f"Extracting report {idx} of {len(pdf_files)}: **{f.name}**")
+                    f.seek(0)
+                    pdf_bytes = f.read()
+                    ex = extract_dha_report_with_claude(api_key, pdf_bytes)
+                    if not ex:
+                        st.error(f"Extraction failed for {f.name} — aborting.")
+                        return
+                    extracts.append(ex)
+                    sources.append(f.name)
+
+                if len(extracts) == 1:
+                    data = extracts[0]
+                else:
+                    data, combine_flags = combine_dha_extracts(extracts, sources)
+                    st.success(
+                        f"Combined {len(extracts)} reports: "
+                        f"{data.get('report_period_start','?')} → {data.get('report_period_end','?')}"
+                    )
+                    for fl in combine_flags:
+                        st.warning(fl)
+
+            elif other_files:
+                # Fall through to the xlsx/csv branch below using the single file
+                file_ext = other_files[0].name.split(".")[-1].lower()
+                uploaded_file = other_files[0]
+                if file_ext in ("xlsx", "xls", "csv"):
+                    try:
+                        if file_ext == "csv":
+                            df = pd.read_csv(uploaded_file)
+                        else:
+                            df = pd.read_excel(uploaded_file)
+                    except Exception as e:
+                        st.error(f"Failed to read file: {e}")
+                        return
+                    st.success(f"Loaded {len(df)} rows from {uploaded_file.name}")
+                    st.dataframe(df.head(20), use_container_width=True)
+                    st.session_state["last_census_df"] = df
+                return
+            else:
+                return
+
+            # Unified post-extraction path (single or combined)
+            if pdf_files:
                 st.success("Report extracted successfully! Redirecting to review...")
 
                 # Store raw extraction and initialize editable copy
@@ -3035,19 +3282,22 @@ def page_new_quote():
 
                 # Initialize monthly controls
                 monthly = data.get("monthly_claims", [])
+                overlap_idx = set(data.pop("_overlap_indices", []) or [])
                 st.session_state["monthly_included"] = [
-                    float(m.get("value", 0) or 0) > 0 for m in monthly
+                    (float(m.get("value", 0) or 0) > 0) and (i not in overlap_idx)
+                    for i, m in enumerate(monthly)
                 ]
                 st.session_state["monthly_haircuts"] = [0.0] * len(monthly)
 
                 # Auto-tick months per SOP: determine which set gives highest average
-                # and pre-select those months
+                # and pre-select those months. Skip auto-tick when a combine
+                # introduced overlapping months — underwriter must choose.
                 vals = [float(m.get("value", 0) or 0) for m in monthly]
-                incurred_idx = [i for i, v in enumerate(vals) if v > 0]
+                incurred_idx = [i for i, v in enumerate(vals) if v > 0 and i not in overlap_idx]
                 policy_eff_dt = parse_date_flexible(data.get("policy_effective_date", ""))
                 psd = policy_eff_dt.day if policy_eff_dt else 1
 
-                if len(incurred_idx) >= 3:
+                if len(incurred_idx) >= 3 and not overlap_idx:
                     if psd <= 5:
                         sets = [incurred_idx, incurred_idx[:-1], incurred_idx[:-2]]
                     else:
@@ -3074,24 +3324,12 @@ def page_new_quote():
                 st.session_state["uw_loading_note"] = ""
                 st.session_state["uw_discount_note"] = ""
 
+                # Preserve combine flags so run_sop_analysis can surface them
+                st.session_state["combine_flags"] = combine_flags
+
                 # Redirect to Extracted Information page
                 st.session_state["active_page"] = "📋 Extracted Information"
                 st.rerun()
-
-            elif file_ext in ("xlsx", "xls", "csv"):
-                try:
-                    if file_ext == "csv":
-                        df = pd.read_csv(uploaded_file)
-                    else:
-                        df = pd.read_excel(uploaded_file)
-                except Exception as e:
-                    st.error(f"Failed to read file: {e}")
-                    return
-
-                st.success(f"Loaded {len(df)} rows from {uploaded_file.name}")
-                st.dataframe(df.head(20), use_container_width=True)
-                st.session_state["last_census_df"] = df
-                return
 
         elif census_files and census_analysis:
             # Census-only mode (no DHA report)
@@ -3466,7 +3704,8 @@ def page_extracted_info():
                 st.session_state["monthly_included"][i] = inc
 
             with cols[1]:
-                st.markdown(f"**{m.get('month', '')}** {m.get('year', '')}")
+                src_suffix = f" _({m['source']})_" if m.get("source") else ""
+                st.markdown(f"**{m.get('month', '')}** {m.get('year', '')}{src_suffix}")
 
             with cols[2]:
                 new_val = st.number_input(
@@ -3840,6 +4079,11 @@ def page_extracted_info():
         uploaded_count = census_count
 
         summary = run_sop_analysis(analysis_data, commissions, company, plan, uploaded_count)
+        # Prepend any multi-PDF combine flags so they're visible in the Excel
+        # Summary sheet and the Dashboard.
+        combine_flags = st.session_state.get("combine_flags") or []
+        if combine_flags:
+            summary["flags"] = combine_flags + (summary.get("flags") or [])
         st.session_state["last_summary"] = summary
         st.session_state["active_page"] = "📋 Extracted Information"
 
