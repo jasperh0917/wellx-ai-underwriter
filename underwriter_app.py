@@ -359,6 +359,40 @@ def unapprove_analysis(analysis_id: str) -> bool:
     })
 
 
+# --- Slack integration ---------------------------------------------------
+
+def send_for_approval(analysis_id: str, excel_bytes: bytes, filename: str) -> Optional[dict]:
+    """DM the UW Manager on Slack with the Excel attached + approve buttons.
+    Calls the `slack-send-approval` Supabase edge function so the Slack bot
+    token stays server-side. Returns {ts, channel} on success, None on failure.
+    """
+    sb = get_supabase()
+    if sb is None:
+        st.error("Supabase is not configured — cannot reach Slack edge function.")
+        return None
+    try:
+        payload = {
+            "analysis_id":  analysis_id,
+            "excel_base64": base64.b64encode(excel_bytes).decode("ascii"),
+            "filename":     filename,
+        }
+        res = sb.functions.invoke("slack-send-approval", invoke_options={"body": payload})
+        # supabase-py 2.x returns raw bytes; older returns a dict.
+        if isinstance(res, (bytes, bytearray)):
+            parsed = json.loads(res.decode("utf-8"))
+        elif isinstance(res, dict):
+            parsed = res
+        else:
+            parsed = json.loads(str(res))
+        if parsed.get("error"):
+            st.error(f"Slack send failed: {parsed['error']}")
+            return None
+        return parsed
+    except Exception as e:
+        st.error(f"Slack send failed: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # SHARED LOOKUP TABLES — canonical broker / underwriter / RM lists
 # (also used by the sibling policy-binding app in the same Supabase project)
@@ -3069,44 +3103,58 @@ def page_new_quote():
         st.markdown("---")
         st.markdown('<div class="section-lbl">Actions</div>', unsafe_allow_html=True)
 
-        col1, col2, col3 = st.columns(3)
+        summary = st.session_state["last_summary"]
+        data = st.session_state["last_extract"]
+        comms = st.session_state.get("last_commissions", commissions)
 
-        # Download Excel
+        excel_bytes = generate_quote_excel(
+            summary,
+            data,
+            comms,
+            prepared_by=st.session_state.get("prepared_by", ""),
+            broker_name=st.session_state.get("last_broker", ""),
+            rm_name=st.session_state.get("last_rm", ""),
+        )
+        excel_filename = f"Claims_Analysis_{summary.get('company_name', 'quote')}_{datetime.now().strftime('%Y%b%d')}.xlsx"
+
+        col1, col2, col3, col4 = st.columns(4)
+
         with col1:
-            summary = st.session_state["last_summary"]
-            data = st.session_state["last_extract"]
-            comms = st.session_state.get("last_commissions", commissions)
-
-            excel_bytes = generate_quote_excel(
-                summary,
-                data,
-                comms,
-                prepared_by=st.session_state.get("prepared_by", ""),
-                broker_name=st.session_state.get("last_broker", ""),
-                rm_name=st.session_state.get("last_rm", ""),
-            )
-
             st.download_button(
-                label="📥 Download Full Quote Excel",
+                label="📥 Download Excel",
                 data=excel_bytes,
-                file_name=f"Claims_Analysis_{summary.get('company_name', 'quote')}_{datetime.now().strftime('%Y%b%d')}.xlsx",
+                file_name=excel_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
+                key="nq_download",
             )
 
-        # Auto-logged to Supabase — this block just updates the status on the logged row
         with col2:
             current_id = st.session_state.get("current_analysis_id")
+            if st.button(
+                "📤 Send for Approval",
+                use_container_width=True,
+                type="primary",
+                disabled=not current_id,
+                help="DMs the UW Manager on Slack with the Excel attached and Approve/Request Changes buttons.",
+                key="nq_send_slack",
+            ):
+                result = send_for_approval(current_id, excel_bytes, excel_filename)
+                if result and result.get("ok"):
+                    st.success("Sent to UW Manager on Slack for approval.")
+                    st.rerun()
+
+        with col3:
             status = st.selectbox(
                 "Quote Status",
                 ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"],
                 index=0,
             )
 
-        with col3:
+        with col4:
             current_id = st.session_state.get("current_analysis_id")
             label = "💾 Update Status" if current_id else "💾 Log Analysis"
-            if st.button(label, use_container_width=True):
+            if st.button(label, use_container_width=True, key="nq_save"):
                 if current_id:
                     if update_analysis(current_id, {"status": status}):
                         st.success(f"Status set to '{status}' (id: {current_id[:8]}…)")
@@ -3827,26 +3875,45 @@ def page_extracted_info():
 
         # ── Post-analysis actions ──
         st.markdown('<div class="section-lbl">Actions</div>', unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
+
+        excel_bytes = generate_quote_excel(
+            summary,
+            analysis_data,
+            commissions,
+            prepared_by=st.session_state.get("prepared_by", ""),
+            broker_name=st.session_state.get("last_broker", ""),
+            rm_name=st.session_state.get("last_rm", ""),
+        )
+        excel_filename = f"Claims_Analysis_{company}_{datetime.now().strftime('%Y%b%d')}.xlsx"
 
         with col1:
-            excel_bytes = generate_quote_excel(
-                summary,
-                analysis_data,
-                commissions,
-                prepared_by=st.session_state.get("prepared_by", ""),
-                broker_name=st.session_state.get("last_broker", ""),
-                rm_name=st.session_state.get("last_rm", ""),
-            )
             st.download_button(
-                label="📥 Download Full Quote Excel",
+                label="📥 Download Excel",
                 data=excel_bytes,
-                file_name=f"Claims_Analysis_{company}_{datetime.now().strftime('%Y%b%d')}.xlsx",
+                file_name=excel_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
+                key="ei_download",
             )
 
         with col2:
+            current_id = st.session_state.get("current_analysis_id")
+            send_disabled = not current_id
+            if st.button(
+                "📤 Send for Approval",
+                use_container_width=True,
+                type="primary",
+                disabled=send_disabled,
+                help="DMs the UW Manager on Slack with the Excel attached and Approve/Request Changes buttons.",
+                key="ei_send_slack",
+            ):
+                result = send_for_approval(current_id, excel_bytes, excel_filename)
+                if result and result.get("ok"):
+                    st.success("Sent to UW Manager on Slack for approval.")
+                    st.rerun()
+
+        with col3:
             status = st.selectbox(
                 "Quote Status",
                 ["neutral", "positive", "not good", "will confirm", "confirmed", "lost"],
@@ -3854,7 +3921,7 @@ def page_extracted_info():
                 key="ei_status",
             )
 
-        with col3:
+        with col4:
             current_id = st.session_state.get("current_analysis_id")
             label = "💾 Update Status" if current_id else "💾 Log Analysis"
             if st.button(label, use_container_width=True, key="ei_save"):
