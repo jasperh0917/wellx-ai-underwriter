@@ -686,31 +686,68 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
     combined["provider_top10_values"]  = _merge_top10(extracts, "provider_top10_values",  "provider")
     combined["provider_top10_counts"]  = _merge_top10(extracts, "provider_top10_counts",  "provider")
 
-    # ── Monthly claims: concat, tag with source, detect overlaps ──
-    all_months: list = []
-    seen_keys: dict = {}
+    # ── Monthly claims: collapse to one row per (month, year).
+    # For months covered by >1 report, keep a `candidates` list and default
+    # the `value` to the HIGHEST-VALUE candidate (matches the SOP's "pick the
+    # highest of A/B/C averages" principle — higher per-month value
+    # maximises the monthly average). The UI can then expose a side-by-side
+    # picker so the underwriter can override.
+    _MONTH_ORDER = {
+        "jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
+        "apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,
+        "aug":8,"august":8,"sep":9,"sept":9,"september":9,
+        "oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12,
+    }
+    grouped: dict = {}
     overlap_labels: list = []
     for ex_idx, e in enumerate(extracts):
         src_label = sources[ex_idx] if ex_idx < len(sources) else f"Report {ex_idx + 1}"
         for m in (e.get("monthly_claims") or []):
-            entry = dict(m)
-            entry["source"] = src_label
-            key = (str(entry.get("month", "")).lower().strip(), entry.get("year"))
-            if key in seen_keys:
-                seen_keys[key].append(len(all_months))
-                label = f"{entry.get('month','')} {entry.get('year','')}".strip()
+            month_raw = str(m.get("month", "") or "").strip()
+            year = m.get("year")
+            key = (month_raw.lower(), year)
+            candidate = {"source": src_label, "value": float(m.get("value", 0) or 0)}
+            if key in grouped:
+                grouped[key]["candidates"].append(candidate)
+                label = f"{month_raw} {year}".strip()
                 if label not in overlap_labels:
                     overlap_labels.append(label)
             else:
-                seen_keys[key] = [len(all_months)]
-            all_months.append(entry)
-    combined["monthly_claims"] = all_months
+                grouped[key] = {
+                    "month": month_raw,
+                    "year":  year,
+                    "candidates": [candidate],
+                }
+
+    # Order rows by (year, month-number). Unparseable months go last.
+    def _sort_key(entry: dict):
+        y = entry.get("year") or 0
+        mn = _MONTH_ORDER.get(str(entry.get("month","")).lower().strip(), 99)
+        return (int(y) if y else 0, mn)
+
+    monthly_collapsed: list = []
+    for entry in sorted(grouped.values(), key=_sort_key):
+        cands = entry["candidates"]
+        # Default pick: highest value → maximises monthly average
+        chosen = max(cands, key=lambda c: c["value"])
+        row = {
+            "month":  entry["month"],
+            "year":   entry["year"],
+            "value":  chosen["value"],
+            "source": chosen["source"],
+        }
+        if len(cands) > 1:
+            row["candidates"] = cands  # expose side-by-side options to the UI
+        monthly_collapsed.append(row)
+
+    combined["monthly_claims"] = monthly_collapsed
 
     if overlap_labels:
         flags.append(
             f"OVERLAPPING MONTHS across reports: {', '.join(overlap_labels)} — "
-            "each duplicate was defaulted to EXCLUDED on the Extracted Information "
-            "page; pick one to include per month."
+            "the higher value was auto-selected per month (to maximise the "
+            "monthly average); review the side-by-side picker on the Extracted "
+            "Information page to override."
         )
 
     # ── Complex cases notes: concatenate ──
@@ -731,9 +768,8 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
         + "; ".join(sources[:len(extracts)])
     )
 
-    # Map overlap positions so the caller can auto-exclude duplicates
-    combined["_overlap_indices"] = [idx for idxs in seen_keys.values() if len(idxs) > 1 for idx in idxs]
-
+    # The collapsed monthly_claims shape carries its own `candidates` sub-list
+    # per overlap row — no separate index list is needed by the caller.
     return combined, flags
 
 
@@ -3282,22 +3318,20 @@ def page_new_quote():
 
                 # Initialize monthly controls
                 monthly = data.get("monthly_claims", [])
-                overlap_idx = set(data.pop("_overlap_indices", []) or [])
                 st.session_state["monthly_included"] = [
-                    (float(m.get("value", 0) or 0) > 0) and (i not in overlap_idx)
-                    for i, m in enumerate(monthly)
+                    float(m.get("value", 0) or 0) > 0 for m in monthly
                 ]
                 st.session_state["monthly_haircuts"] = [0.0] * len(monthly)
 
                 # Auto-tick months per SOP: determine which set gives highest average
-                # and pre-select those months. Skip auto-tick when a combine
-                # introduced overlapping months — underwriter must choose.
+                # and pre-select those months. (Combine already picked the highest
+                # value per overlap month, so this runs unconditionally.)
                 vals = [float(m.get("value", 0) or 0) for m in monthly]
-                incurred_idx = [i for i, v in enumerate(vals) if v > 0 and i not in overlap_idx]
+                incurred_idx = [i for i, v in enumerate(vals) if v > 0]
                 policy_eff_dt = parse_date_flexible(data.get("policy_effective_date", ""))
                 psd = policy_eff_dt.day if policy_eff_dt else 1
 
-                if len(incurred_idx) >= 3 and not overlap_idx:
+                if len(incurred_idx) >= 3:
                     if psd <= 5:
                         sets = [incurred_idx, incurred_idx[:-1], incurred_idx[:-2]]
                     else:
@@ -3679,6 +3713,39 @@ def page_extracted_info():
     monthly = data.get("monthly_claims", [])
     included = st.session_state.get("monthly_included", [True] * len(monthly))
     haircuts = st.session_state.get("monthly_haircuts", [0.0] * len(monthly))
+
+    # ── Multi-PDF overlap reconciliation (side-by-side) ──
+    # Rows with a `candidates` list came from >1 DHA report. Let the
+    # underwriter pick which report's value wins for that month; the
+    # default is the highest-value candidate (maximises monthly average).
+    overlap_rows = [(i, m) for i, m in enumerate(monthly) if m.get("candidates")]
+    if overlap_rows:
+        st.markdown(
+            '<div class="info-box">🔀 <strong>Overlap Reconciliation</strong> — '
+            f'{len(overlap_rows)} month(s) are covered by multiple reports. '
+            'The higher value is auto-selected; override below if you prefer a specific report.</div>',
+            unsafe_allow_html=True,
+        )
+        for idx, m in overlap_rows:
+            cands = m["candidates"]
+            labels = [f"{c['source']} — AED {c['value']:,.0f}" for c in cands]
+            # Index of the current chosen candidate (match by value+source)
+            cur_idx = 0
+            for j, c in enumerate(cands):
+                if c["value"] == m.get("value") and c["source"] == m.get("source"):
+                    cur_idx = j
+                    break
+            pick = st.radio(
+                f"**{m.get('month','')}** {m.get('year','')}",
+                labels, index=cur_idx, horizontal=True,
+                key=f"overlap_{idx}",
+            )
+            chosen_idx = labels.index(pick)
+            chosen = cands[chosen_idx]
+            if m.get("value") != chosen["value"] or m.get("source") != chosen["source"]:
+                data["monthly_claims"][idx]["value"] = chosen["value"]
+                data["monthly_claims"][idx]["source"] = chosen["source"]
+        st.markdown("---")
 
     if monthly:
         # Column headers
