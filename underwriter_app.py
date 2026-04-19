@@ -582,6 +582,40 @@ def _latest_date(candidates: list) -> str:
     return next((c for c in reversed(candidates) if c), "")
 
 
+def _sum_census(census_dicts: list) -> dict:
+    """Sum subgroup census dicts (each has grand_total plus male /
+    single_female / married_female breakdowns). Returns one combined
+    census dict with the same shape."""
+    result: dict = {"grand_total": 0}
+    # grand_total — sum across subgroups
+    for c in census_dicts:
+        if not c:
+            continue
+        gt = c.get("grand_total", 0) or 0
+        try:
+            result["grand_total"] += int(gt)
+        except (TypeError, ValueError):
+            pass
+    # Per-gender breakdown — only emit if at least one subgroup had it
+    for cat in ("male", "single_female", "married_female"):
+        cat_sum: dict = {}
+        has_any = False
+        for c in census_dicts:
+            if not c:
+                continue
+            cat_data = c.get(cat) or {}
+            if cat_data:
+                has_any = True
+                for k, v in cat_data.items():
+                    try:
+                        cat_sum[k] = cat_sum.get(k, 0) + int(v or 0)
+                    except (TypeError, ValueError):
+                        pass
+        if has_any:
+            result[cat] = cat_sum
+    return result
+
+
 def _sum_claims_by_type(extracts: list) -> dict:
     """Sum claims_by_member_type.totals and row breakdowns across extracts."""
     combined: dict = {"totals": {}}
@@ -632,9 +666,12 @@ def _merge_top10(extracts: list, list_key: str, name_key: str) -> list:
 
 
 def combine_dha_extracts(extracts: list, sources: list) -> tuple:
-    """Combine N DHA extracts (same prospect, consecutive periods) into one
-    unified dict. Returns (combined_dict, warning_flags).
+    """Combine N DHA extracts for SUBGROUPS of the same parent group (e.g.
+    AFAQ with separate AUH-CAT-A, AUH-CAT-B, DXB-CAT-C … reports) into one
+    unified dict. Everything is ADDITIVE: claims totals, monthly claims,
+    census, by-member-type totals all get summed across subgroups.
 
+    Returns (combined_dict, info_flags).
     sources: list of human labels (usually PDF filenames) — same length as extracts.
     """
     if len(extracts) <= 1:
@@ -644,9 +681,11 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
     combined: dict = {}
 
     # ── Identity / metadata ──
-    combined["employer_name"] = next((e.get("employer_name") for e in extracts if e.get("employer_name")), "")
+    combined["employer_name"] = next(
+        (e.get("employer_name") for e in extracts if e.get("employer_name")), "",
+    )
 
-    # ── Dates ──
+    # ── Dates: subgroups share a reporting period; envelope widens on mismatch ──
     combined["policy_effective_date"] = _earliest_date([e.get("policy_effective_date") for e in extracts])
     combined["policy_expiry_date"]    = _latest_date  ([e.get("policy_expiry_date")    for e in extracts])
     combined["report_period_start"]   = _earliest_date([e.get("report_period_start")   for e in extracts])
@@ -656,26 +695,14 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
         [e.get("initial_policy_effective_date") for e in extracts]
     )
 
-    # ── Claims (additive) ──
+    # ── Claims (ADDITIVE across subgroups) ──
     combined["claims_paid"]        = sum(float(e.get("claims_paid", 0) or 0)        for e in extracts)
     combined["claims_outstanding"] = sum(float(e.get("claims_outstanding", 0) or 0) for e in extracts)
     combined["claims_ibnr"]        = sum(float(e.get("claims_ibnr", 0) or 0)        for e in extracts)
 
-    # ── Census: take start from the earliest report, end from the latest ──
-    period_starts = [(parse_date_flexible(e.get("report_period_start", "")), i) for i, e in enumerate(extracts)]
-    period_ends   = [(parse_date_flexible(e.get("report_period_end", "")),   i) for i, e in enumerate(extracts)]
-    period_starts = [p for p in period_starts if p[0]]
-    period_ends   = [p for p in period_ends   if p[0]]
-    if period_starts:
-        earliest_idx = min(period_starts, key=lambda x: x[0])[1]
-        combined["census_start"] = extracts[earliest_idx].get("census_start", {})
-    else:
-        combined["census_start"] = extracts[0].get("census_start", {})
-    if period_ends:
-        latest_idx = max(period_ends, key=lambda x: x[0])[1]
-        combined["census_end"] = extracts[latest_idx].get("census_end", {})
-    else:
-        combined["census_end"] = extracts[-1].get("census_end", {})
+    # ── Census: SUM grand_totals + per-gender breakdowns across subgroups ──
+    combined["census_start"] = _sum_census([e.get("census_start", {}) for e in extracts])
+    combined["census_end"]   = _sum_census([e.get("census_end",   {}) for e in extracts])
 
     # ── Claims by member type (sum per category + per row) ──
     combined["claims_by_member_type"] = _sum_claims_by_type(extracts)
@@ -686,12 +713,7 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
     combined["provider_top10_values"]  = _merge_top10(extracts, "provider_top10_values",  "provider")
     combined["provider_top10_counts"]  = _merge_top10(extracts, "provider_top10_counts",  "provider")
 
-    # ── Monthly claims: collapse to one row per (month, year).
-    # For months covered by >1 report, keep a `candidates` list and default
-    # the `value` to the HIGHEST-VALUE candidate (matches the SOP's "pick the
-    # highest of A/B/C averages" principle — higher per-month value
-    # maximises the monthly average). The UI can then expose a side-by-side
-    # picker so the underwriter can override.
+    # ── Monthly claims: SUM across subgroups per (month, year) ──
     _MONTH_ORDER = {
         "jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
         "apr":4,"april":4,"may":5,"jun":6,"june":6,"jul":7,"july":7,
@@ -699,56 +721,46 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
         "oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12,
     }
     grouped: dict = {}
-    overlap_labels: list = []
     for ex_idx, e in enumerate(extracts):
         src_label = sources[ex_idx] if ex_idx < len(sources) else f"Report {ex_idx + 1}"
         for m in (e.get("monthly_claims") or []):
             month_raw = str(m.get("month", "") or "").strip()
             year = m.get("year")
             key = (month_raw.lower(), year)
-            candidate = {"source": src_label, "value": float(m.get("value", 0) or 0)}
-            if key in grouped:
-                grouped[key]["candidates"].append(candidate)
-                label = f"{month_raw} {year}".strip()
-                if label not in overlap_labels:
-                    overlap_labels.append(label)
-            else:
+            val = float(m.get("value", 0) or 0)
+            if key not in grouped:
                 grouped[key] = {
-                    "month": month_raw,
-                    "year":  year,
-                    "candidates": [candidate],
+                    "month":         month_raw,
+                    "year":          year,
+                    "value":         0.0,
+                    "contributions": [],
                 }
+            grouped[key]["value"] += val
+            grouped[key]["contributions"].append({"source": src_label, "value": val})
 
-    # Order rows by (year, month-number). Unparseable months go last.
     def _sort_key(entry: dict):
         y = entry.get("year") or 0
         mn = _MONTH_ORDER.get(str(entry.get("month","")).lower().strip(), 99)
         return (int(y) if y else 0, mn)
 
-    monthly_collapsed: list = []
+    monthly_combined: list = []
     for entry in sorted(grouped.values(), key=_sort_key):
-        cands = entry["candidates"]
-        # Default pick: highest value → maximises monthly average
-        chosen = max(cands, key=lambda c: c["value"])
         row = {
-            "month":  entry["month"],
-            "year":   entry["year"],
-            "value":  chosen["value"],
-            "source": chosen["source"],
+            "month": entry["month"],
+            "year":  entry["year"],
+            "value": entry["value"],
         }
-        if len(cands) > 1:
-            row["candidates"] = cands  # expose side-by-side options to the UI
-        monthly_collapsed.append(row)
+        # Keep a drill-down only when >1 subgroup contributed — otherwise it's
+        # just noise on the UI.
+        if len(entry["contributions"]) > 1:
+            row["contributions"] = entry["contributions"]
+        else:
+            # Single-subgroup month — carry source for labelling.
+            if entry["contributions"]:
+                row["source"] = entry["contributions"][0]["source"]
+        monthly_combined.append(row)
 
-    combined["monthly_claims"] = monthly_collapsed
-
-    if overlap_labels:
-        flags.append(
-            f"OVERLAPPING MONTHS across reports: {', '.join(overlap_labels)} — "
-            "the higher value was auto-selected per month (to maximise the "
-            "monthly average); review the side-by-side picker on the Extracted "
-            "Information page to override."
-        )
+    combined["monthly_claims"] = monthly_combined
 
     # ── Complex cases notes: concatenate ──
     notes = [e.get("complex_cases_notes", "") for e in extracts if e.get("complex_cases_notes")]
@@ -762,14 +774,12 @@ def combine_dha_extracts(extracts: list, sources: list) -> tuple:
         for n in [e.get("extraction_notes", "")] if n
     )
 
-    # Also return a per-report summary flag so the underwriter sees what fed the combine
+    # Informational banner flag so the underwriter sees what fed the combine
     flags.insert(0,
-        f"COMBINED FROM {len(extracts)} REPORTS: "
+        f"COMBINED FROM {len(extracts)} SUBGROUP REPORTS (summed): "
         + "; ".join(sources[:len(extracts)])
     )
 
-    # The collapsed monthly_claims shape carries its own `candidates` sub-list
-    # per overlap row — no separate index list is needed by the caller.
     return combined, flags
 
 
@@ -3714,38 +3724,27 @@ def page_extracted_info():
     included = st.session_state.get("monthly_included", [True] * len(monthly))
     haircuts = st.session_state.get("monthly_haircuts", [0.0] * len(monthly))
 
-    # ── Multi-PDF overlap reconciliation (side-by-side) ──
-    # Rows with a `candidates` list came from >1 DHA report. Let the
-    # underwriter pick which report's value wins for that month; the
-    # default is the highest-value candidate (maximises monthly average).
-    overlap_rows = [(i, m) for i, m in enumerate(monthly) if m.get("candidates")]
-    if overlap_rows:
-        st.markdown(
-            '<div class="info-box">🔀 <strong>Overlap Reconciliation</strong> — '
-            f'{len(overlap_rows)} month(s) are covered by multiple reports. '
-            'The higher value is auto-selected; override below if you prefer a specific report.</div>',
-            unsafe_allow_html=True,
-        )
-        for idx, m in overlap_rows:
-            cands = m["candidates"]
-            labels = [f"{c['source']} — AED {c['value']:,.0f}" for c in cands]
-            # Index of the current chosen candidate (match by value+source)
-            cur_idx = 0
-            for j, c in enumerate(cands):
-                if c["value"] == m.get("value") and c["source"] == m.get("source"):
-                    cur_idx = j
-                    break
-            pick = st.radio(
-                f"**{m.get('month','')}** {m.get('year','')}",
-                labels, index=cur_idx, horizontal=True,
-                key=f"overlap_{idx}",
-            )
-            chosen_idx = labels.index(pick)
-            chosen = cands[chosen_idx]
-            if m.get("value") != chosen["value"] or m.get("source") != chosen["source"]:
-                data["monthly_claims"][idx]["value"] = chosen["value"]
-                data["monthly_claims"][idx]["source"] = chosen["source"]
-        st.markdown("---")
+    # ── Multi-PDF subgroup breakdown (drill-down) ──
+    # Rows with a `contributions` list were summed across multiple
+    # subgroup reports (e.g. AFAQ AUH CAT A + AUH CAT B + DXB CAT C …).
+    # Surface a collapsed expander so the underwriter can verify the
+    # per-subgroup contributions without cluttering the main table.
+    summed_rows = [(i, m) for i, m in enumerate(monthly) if m.get("contributions")]
+    if summed_rows:
+        subgroup_count = max(len(m["contributions"]) for _, m in summed_rows)
+        with st.expander(
+            f"🧩 View monthly subgroup breakdown "
+            f"({len(summed_rows)} month(s) summed across up to {subgroup_count} subgroups)",
+            expanded=False,
+        ):
+            breakdown_rows: list = []
+            for _, m in summed_rows:
+                month_lbl = f"{m.get('month','')} {m.get('year','')}".strip()
+                row = {"Month": month_lbl, "Total (AED)": f"{m['value']:,.0f}"}
+                for c in m["contributions"]:
+                    row[c["source"]] = f"{c['value']:,.0f}"
+                breakdown_rows.append(row)
+            st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
 
     if monthly:
         # Column headers
